@@ -14,7 +14,7 @@
  * See the GNU Lesser General Public License for more details.
  *
  *
- * Copyright (c) 2002-2018 Hitachi Vantara. All rights reserved.
+ * Copyright (c) 2002-2023 Hitachi Vantara. All rights reserved.
  *
  */
 
@@ -182,7 +182,14 @@ public class SchedulerService {
   public Job updateJob( JobScheduleRequest scheduleRequest )
     throws IllegalAccessException, IOException, SchedulerException {
     Job job = getScheduler().getJob( scheduleRequest.getJobId() );
-    if ( job != null ) {
+
+    // new job might be assigned to a different user
+    JobScheduleParam actionUser = scheduleRequest.getJobParameters().stream()
+      .filter( jobParameter -> jobParameter.getName().equals( QuartzScheduler.RESERVEDMAPKEY_ACTIONUSER  ) )
+      .findFirst()
+      .orElse( null );
+
+    if ( actionUser == null && job != null ) {
       scheduleRequest.getJobParameters()
         .add( new JobScheduleParam( QuartzScheduler.RESERVEDMAPKEY_ACTIONUSER, job.getUserName() ) );
     }

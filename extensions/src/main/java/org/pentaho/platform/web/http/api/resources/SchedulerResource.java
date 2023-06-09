@@ -141,7 +141,7 @@ public class SchedulerResource extends AbstractJaxRSResource {
    * removing the current instance.
    *
    * <p><b>Example Request:</b><br />
-   *  POST pentaho/api/scheduler/job/edit
+   *  POST pentaho/api/scheduler/job/update
    * </p>
    * <br /><b>POST data:</b>
    *  <pre function="syntax.xml">
