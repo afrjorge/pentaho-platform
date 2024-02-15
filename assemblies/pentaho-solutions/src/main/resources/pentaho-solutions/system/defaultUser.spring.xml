@@ -20,6 +20,11 @@
                 <value>org.pentaho.security.publish</value>
 	</util:list>
 
+	<util:list id="schedulePowerUser">
+		<value>org.pentaho.scheduler.execute</value>
+		<value>org.pentaho.repository.read</value><!-- TODO needed?? -->
+	</util:list>
+
 	<util:list id="reportAuthor">
 		<value>org.pentaho.security.publish</value>
 		<value>org.pentaho.scheduler.manage</value>
@@ -31,6 +36,7 @@
 
 	<util:map id="role-mappings">
 		<entry key="Power User" value-ref="powerUser" />
+		<entry key="Schedule Power User" value-ref="schedulePowerUser" />
 		<entry key="Report Author" value-ref="reportAuthor" />
 		<entry key="Business Analyst" value-ref="businessAnalyst" />
 	</util:map>
@@ -64,7 +70,15 @@
 				<value>Report Author</value>
 			</util:list>
 		</entry>
-        <entry key-ref="singleTenantAdminUserName">
+
+		<entry key="bob">
+			<util:list>
+				<ref bean="singleTenantAuthenticatedAuthorityName"/>
+				<value>Schedule Power User</value>
+			</util:list>
+		</entry>
+
+		<entry key-ref="singleTenantAdminUserName">
 			<util:list>
 				<ref bean="singleTenantAuthenticatedAuthorityName"/>
 				<ref bean="singleTenantAdminAuthorityName"/>

@@ -567,6 +567,7 @@
       <util:list>
         <!-- <ref bean="singleTenantAuthenticatedAuthorityName"/> --> <!-- 'Authenticated' system role -->
         <value>Power User</value>
+        <!-- TODO NEEDED ?? <value>Schedule Power User</value> -->
       </util:list>
     </property>
   </bean>
@@ -776,6 +777,13 @@
     <pen:publish as-type="INTERFACES">
       <pen:attributes>
         <pen:attr key="priority" value="40"/>
+      </pen:attributes>
+    </pen:publish>
+  </bean>
+  <bean class="org.pentaho.platform.security.policy.rolebased.actions.SchedulerExecuteAction">
+    <pen:publish as-type="INTERFACES">
+      <pen:attributes>
+        <pen:attr key="priority" value="35"/>
       </pen:attributes>
     </pen:publish>
   </bean>

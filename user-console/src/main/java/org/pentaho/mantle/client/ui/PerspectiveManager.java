@@ -119,19 +119,61 @@ public class PerspectiveManager extends SimplePanel {
     RequestBuilder builder = new RequestBuilder( RequestBuilder.GET, url );
     builder.setHeader( "Content-Type", "application/json" ); //$NON-NLS-1$//$NON-NLS-2$
     builder.setHeader( "If-Modified-Since", "01 Jan 1970 00:00:00 GMT" );
-    canSchedule = true;
+    canSchedule = false;
     try {
       builder.sendRequest( null, new RequestCallback() {
         @Override
         public void onError( Request request, Throwable throwable ) {
-          setupPerspectiveManager();
+          try {
+            final String url2 = MantleUtils.getSchedulerPluginContextURL() + "api/scheduler/canExecuteSchedules?ts=" + System.currentTimeMillis(); //$NON-NLS-1$
+            RequestBuilder requestBuilder2 = new RequestBuilder( RequestBuilder.GET, url2 );
+            requestBuilder2.setHeader( "accept", "application/json" ); //$NON-NLS-1$ //$NON-NLS-2$
+            requestBuilder2.setHeader( "If-Modified-Since", "01 Jan 1970 00:00:00 GMT" );
+            requestBuilder2.sendRequest( null, new RequestCallback() {
+
+              public void onError( Request request, Throwable caught ) {
+                setupPerspectiveManager();
+              }
+
+              public void onResponseReceived( Request request, Response response ) {
+                canSchedule = "true".equalsIgnoreCase( response.getText() ); //$NON-NLS-1$
+                setupPerspectiveManager();
+              }
+
+            } );
+          } catch ( RequestException e ) {
+          }
         }
         @Override
         public void onResponseReceived( Request request, Response response ) {
           if ( response.getStatusCode() == 200 ) {
             canSchedule = "true".equals( response.getText() );
+
+            if ( canSchedule ) {
+              setupPerspectiveManager();
+              return;
+            }
           }
-          setupPerspectiveManager();
+
+          try {
+            final String url2 = MantleUtils.getSchedulerPluginContextURL() + "api/scheduler/canExecuteSchedules?ts=" + System.currentTimeMillis(); //$NON-NLS-1$
+            RequestBuilder requestBuilder2 = new RequestBuilder( RequestBuilder.GET, url2 );
+            requestBuilder2.setHeader( "accept", "application/json" ); //$NON-NLS-1$ //$NON-NLS-2$
+            requestBuilder2.setHeader( "If-Modified-Since", "01 Jan 1970 00:00:00 GMT" );
+            requestBuilder2.sendRequest( null, new RequestCallback() {
+
+              public void onError( Request request, Throwable caught ) {
+                setupPerspectiveManager();
+              }
+
+              public void onResponseReceived( Request request, Response response ) {
+                canSchedule = "true".equalsIgnoreCase( response.getText() ); //$NON-NLS-1$
+                setupPerspectiveManager();
+              }
+
+            } );
+          } catch ( RequestException e ) {
+          }
         }
       } );
     } catch ( Exception e ) {
