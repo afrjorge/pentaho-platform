@@ -84,8 +84,12 @@
     <filter-class>org.pentaho.platform.web.http.filters.ProxyTrustingFilter</filter-class>
     <init-param>
       <param-name>TrustedIpAddrs</param-name>
-      <param-value>127.0.0.1,0\:0\:0\:0\:0\:0\:0\:1(%.+)*$</param-value>
+      <param-value>192.168.1.66,127.0.0.1,0\:0\:0\:0\:0\:0\:0\:1(%.+)*$</param-value>
       <description>Comma separated list of IP addresses of a trusted hosts.</description>
+    </init-param>
+    <init-param>
+      <param-name>CheckHeader</param-name>
+      <param-value>false</param-value>
     </init-param>
   </filter>
 
@@ -127,6 +131,11 @@
   <filter-mapping>
     <filter-name>Proxy Trusting Filter</filter-name>
     <url-pattern>/i18n</url-pattern>
+  </filter-mapping>
+
+  <filter-mapping>
+    <filter-name>Proxy Trusting Filter</filter-name>
+    <url-pattern>/Xmla/xmlaproxy</url-pattern>
   </filter-mapping>
 
   <!--
@@ -372,6 +381,15 @@
 
   <!-- insert additional servlets -->
 
+  <servlet>
+    <servlet-name>XmlaProxyServlet</servlet-name>
+    <servlet-class>org.pentaho.platform.web.servlet.ProxyServlet</servlet-class>
+    <init-param>
+      <param-name>ProxyURL</param-name>
+      <param-value>http://localhost:8080/pentaho/Xmla?_TRUST_USER_=Admin</param-value>
+    </init-param>
+  </servlet>
+
   <servlet-mapping>
         <servlet-name>proxy</servlet-name>
         <url-pattern>/osgi/*</url-pattern>
@@ -408,6 +426,11 @@
   </servlet-mapping>
 
   <servlet-mapping>
+    <servlet-name>Xmla</servlet-name>
+    <url-pattern>/Xmla/xmlaproxy</url-pattern>
+  </servlet-mapping>
+
+  <servlet-mapping>
     <servlet-name>GenericServlet</servlet-name>
     <url-pattern>/content/*</url-pattern>
   </servlet-mapping>
@@ -430,6 +453,11 @@
   <servlet-mapping>
     <servlet-name>PluginDispatchServlet</servlet-name>
     <url-pattern>/plugin/*</url-pattern>
+  </servlet-mapping>
+
+  <servlet-mapping>
+    <servlet-name>XmlaProxyServlet</servlet-name>
+    <url-pattern>/xmlaproxy</url-pattern>
   </servlet-mapping>
 
   <!-- Pentaho Servlets -->
