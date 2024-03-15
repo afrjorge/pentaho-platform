@@ -14,7 +14,7 @@
  * See the GNU Lesser General Public License for more details.
  *
  *
- * Copyright (c) 2002-2021 Hitachi Vantara. All rights reserved.
+ * Copyright (c) 2002-2024 Hitachi Vantara. All rights reserved.
  *
  */
 
@@ -24,6 +24,7 @@ import org.apache.commons.lang.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.http.Header;
+import org.apache.http.HttpEntity;
 import org.apache.http.HttpResponse;
 import org.apache.http.HttpStatus;
 import org.apache.http.NameValuePair;
@@ -32,6 +33,9 @@ import org.apache.http.client.HttpClient;
 import org.apache.http.client.methods.HttpPost;
 import org.apache.http.client.methods.HttpRequestBase;
 import org.apache.http.client.utils.URIBuilder;
+import org.apache.http.entity.ByteArrayEntity;
+import org.apache.http.entity.ContentType;
+import org.apache.http.impl.client.CloseableHttpClient;
 import org.apache.http.message.BasicNameValuePair;
 import org.pentaho.di.core.util.HttpClientManager;
 import org.pentaho.platform.api.engine.IPentahoSession;
@@ -44,26 +48,31 @@ import javax.servlet.ServletException;
 import javax.servlet.ServletOutputStream;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
+import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URL;
 import java.util.ArrayList;
+import java.util.Enumeration;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 
 /**
  * This servlet is used to Proxy a Servlet request to another server for processing and returns that result to the
- * caller as if this Servlet actiually serviced it. Setup the proxy by editing the <b>web.xml</b> to map the servlet
+ * caller as if this Servlet actually serviced it. Setup the proxy by editing the <b>web.xml</b> to map the servlet
  * name you want to proxy to the Proxy Servlet class.
  * <p>
  * <p>
  * <pre>
  *  &lt;servlet&gt;
  *    &lt;servlet-name&gt;ViewAction&lt;/servlet-name&gt;
- *    &lt;servlet-class&gt;com.pentaho.ui.servlet.ProxyServlet&lt;/servlet-class&gt;
+ *    &lt;servlet-class&gt;org.pentaho.platform.web.servlet.ProxyServlet&lt;/servlet-class&gt;
  *    &lt;init-param&gt;
  *       &lt;param-name&gt;ProxyURL&lt;/param-name&gt;
  *       &lt;param-value&gt;http://my.remoteserver.com:8080/pentaho&lt;/param-value&gt;
@@ -72,7 +81,7 @@ import java.util.Map;
  * </pre>
  * <p>
  * In the above example, all requests to /ViewAction will be forwarded to the ViewAction Servlet running on the Hitachi
- * Vantara server atmy.remoteserver.com:8080
+ * Vantara server at my.remoteserver.com:8080
  * <p>
  * <p>
  * NOTES:
@@ -80,7 +89,7 @@ import java.util.Map;
  * <p>
  * For this to be useful, both Pentaho servers should be using the same database repository.
  * <p>
- * The recieving server should have the ProxyTrustingFilter enabled to handle authicentation.
+ * The receiving server should have the ProxyTrustingFilter enabled to handle authentication.
  * <p>
  * This Servlet only works with GET requests. All requests in the Pentaho BI Platform are currently gets.
  *
@@ -170,8 +179,8 @@ public class ProxyServlet extends ServletBase {
       }
 
       URI requestUri = buildProxiedUri( request, userName );
-
-      doProxyCore( requestUri, response );
+      // new BufferedReader(new InputStreamReader(request.getInputStream())).readLine()
+      doProxyCore( requestUri, request, response );
 
     } catch ( URISyntaxException e ) {
       error( Messages.getInstance().getErrorString( "ProxyServlet.ERROR_0006_URI_SYNTAX_EXCEPTION", e.getMessage() ) );
@@ -181,27 +190,41 @@ public class ProxyServlet extends ServletBase {
     }
   }
 
-  protected URI buildProxiedUri( final HttpServletRequest request, final String userName ) throws URISyntaxException {
+  protected URI buildProxiedUri( final HttpServletRequest request, final String userName ) throws URISyntaxException, MalformedURLException {
+    URI proxyURI = new URL( proxyURL.trim() ).toURI();
 
-    String baseUri = proxyURL + request.getServletPath();
-    URIBuilder uriBuilder = new URIBuilder( baseUri );
+    // ignores query string
+    URI baseURI = new URI(
+        proxyURI.getScheme(),
+        proxyURI.getAuthority(),
+        proxyURI.getPath() + request.getServletPath(),
+        proxyURI.getQuery(), proxyURI.getFragment() );
+
+    //String baseUri = url.getPath() + request.getServletPath();
+    URIBuilder uriBuilder = new URIBuilder( baseURI );
 
     List<NameValuePair> queryParams = uriBuilder.isQueryEmpty() ? new ArrayList<>() : uriBuilder.getQueryParams();
-
-    // Just in case someone is trying to spoof the proxy.
-    queryParams.removeIf( pair -> pair.getName().equals( TRUST_USER_PARAM ) );
 
     // Copy the parameters from the request to the proxy.
     Map<String, String[]> paramMap = request.getParameterMap();
     for ( Map.Entry<String, String[]> entry : paramMap.entrySet() ) {
+      // Just in case someone is trying to spoof the proxy.
+      if ( entry.getKey().equals( TRUST_USER_PARAM ) ) {
+        continue;
+      }
+
       for ( String element : entry.getValue() ) {
         queryParams.add( new BasicNameValuePair( entry.getKey(), element ) );
       }
     }
 
-    // Add the trusted user from the session
+    // Add the trusted user from the session, if it is not set via the proxy URL
     if ( StringUtils.isNotEmpty( userName ) ) {
-      queryParams.add( new BasicNameValuePair( TRUST_USER_PARAM, userName ) );
+      if ( !uriBuilder.isQueryEmpty()
+        && uriBuilder.getQueryParams().stream().noneMatch( param -> param.getName().equals( TRUST_USER_PARAM ) ) ) {
+
+        queryParams.add( new BasicNameValuePair( TRUST_USER_PARAM, userName ) );
+      }
 
       if ( isLocaleOverrideEnabled ) {
         queryParams.add( new BasicNameValuePair( TRUST_LOCALE_OVERRIDE_PARAM, LocaleHelper.getLocale().toString() ) );
@@ -215,14 +238,29 @@ public class ProxyServlet extends ServletBase {
     return uriBuilder.build();
   }
 
-  protected void doProxyCore( final URI requestUri, final HttpServletResponse response ) {
+  protected void doProxyCore( final URI requestUri, final HttpServletRequest request, final HttpServletResponse response ) {
 
     HttpPost method = new HttpPost( requestUri );
 
     // Now do the request
     HttpClient client = HttpClientManager.getInstance().createDefaultClient();
-
+    //try ( CloseableHttpClient client = HttpClientManager.getInstance().createDefaultClient() ) {
     try {
+      // Set request header Content-Type for the new proxied request.
+      //setHeader( "Content-Type" , request, method );
+
+      // Send the enhanced request body to target.
+      InputStream inputStream = request.getInputStream();
+      ByteArrayOutputStream originalBody = new ByteArrayOutputStream();
+      int n;
+      byte[] data = new byte[1024];
+      while ( ( n = inputStream.read( data, 0, data.length ) ) != -1 ) {
+        originalBody.write( data, 0, n );
+      }
+      originalBody.flush();
+      final HttpEntity entity = new ByteArrayEntity( originalBody.toByteArray(), ContentType.TEXT_XML );
+      method.setEntity( entity );
+
       // Execute the method.
       HttpResponse httpResponse = client.execute( method );
       StatusLine statusLine = httpResponse.getStatusLine();
@@ -233,8 +271,27 @@ public class ProxyServlet extends ServletBase {
         return;
       }
 
-      setHeader( "Content-Type", method, response ); //$NON-NLS-1$
-      setHeader( "Content-Length", method, response ); //$NON-NLS-1$
+      // Set response headers
+      if ( StringUtils.isEmpty( response.getContentType() )
+        && method.getEntity().getContentType() != null
+        && StringUtils.isNotEmpty( method.getEntity().getContentType().getValue() ) ) {
+
+        response.setContentType( method.getEntity().getContentType().getValue() );
+      }
+
+      if ( StringUtils.isEmpty( response.getContentType() )
+          && method.getEntity().getContentType() != null
+          && StringUtils.isNotEmpty( method.getEntity().getContentType().getValue() ) ) {
+
+        response.setContentType( method.getEntity().getContentType().getValue() );
+      }
+      /*
+      if ( !copyHeader( "Content-Length", method, response ) ) {
+        final long contentLength = method.getEntity().getContentLength();
+        if ( contentLength > 0 ) {
+          response.setHeader( "Content-Length", "" + contentLength );
+        }
+      }*/
 
       InputStream inStr = httpResponse.getEntity().getContent();
       ServletOutputStream outStr = response.getOutputStream();
@@ -254,11 +311,15 @@ public class ProxyServlet extends ServletBase {
     }
   }
 
-  private void setHeader( final String headerStr, final HttpRequestBase method, final HttpServletResponse response ) {
+  private boolean copyHeader( final String headerStr, final HttpRequestBase method, final HttpServletResponse response ) {
     Header header = method.getHeaders( headerStr )[ 0 ];
     if ( header != null ) {
       response.setHeader( headerStr, header.getValue() );
+
+      return true;
     }
+
+    return false;
   }
 
   @Override
