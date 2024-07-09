@@ -114,7 +114,7 @@ public class PentahoSystemPluginManager implements IPluginManager {
   private Logger logger = LoggerFactory.getLogger( getClass() );
   private Set<IPluginManagerListener> listeners = new HashSet<IPluginManagerListener>();
 
-  private static void createAndRegisterLifecycleListeners( IPlatformPlugin plugin, ClassLoader loader )
+  protected static void createAndRegisterLifecycleListeners( IPlatformPlugin plugin, ClassLoader loader )
     throws PlatformPluginRegistrationException {
     try {
       if ( plugin.getLifecycleListenerClassnames() != null ) {
@@ -358,7 +358,7 @@ public class PentahoSystemPluginManager implements IPluginManager {
   }
 
   @SuppressWarnings( "unchecked" )
-  private void registerPlugin( final IPlatformPlugin plugin ) throws PlatformPluginRegistrationException,
+  public void registerPlugin( final IPlatformPlugin plugin ) throws PlatformPluginRegistrationException,
     PluginLifecycleException {
     // TODO: we should treat the registration of a plugin as an atomic operation
     // with rollback if something is broken
@@ -405,7 +405,7 @@ public class PentahoSystemPluginManager implements IPluginManager {
     }
   }
 
-  private void registerOverlays( IPlatformPlugin plugin ) {
+  protected void registerOverlays( IPlatformPlugin plugin ) {
     int priority = plugin.getOverlays().size();
     for ( XulOverlay overlay : plugin.getOverlays() ) {
       // preserve ordering as it may be significant
@@ -420,7 +420,7 @@ public class PentahoSystemPluginManager implements IPluginManager {
     }
   }
 
-  private void registerServices( IPlatformPlugin plugin, ClassLoader loader, GenericApplicationContext beanFactory )
+  protected void registerServices( IPlatformPlugin plugin, ClassLoader loader, GenericApplicationContext beanFactory )
     throws PlatformPluginRegistrationException {
     IServiceManager svcManager = PentahoSystem.get( IServiceManager.class, null );
 
@@ -510,7 +510,7 @@ public class PentahoSystemPluginManager implements IPluginManager {
     return services;
   }
 
-  private void registerSettings( IPlatformPlugin plugin, ClassLoader loader ) {
+  protected void registerSettings( IPlatformPlugin plugin, ClassLoader loader ) {
 
     IPluginResourceLoader resLoader = PentahoSystem.get( IPluginResourceLoader.class, null );
 
@@ -540,7 +540,7 @@ public class PentahoSystemPluginManager implements IPluginManager {
 
   }
 
-  private void registerPerspectives( IPlatformPlugin plugin, ClassLoader loader ) {
+  protected void registerPerspectives( IPlatformPlugin plugin, ClassLoader loader ) {
     for ( IPluginPerspective pluginPerspective : plugin.getPluginPerspectives() ) {
 
       //      PentahoSystem.get( IPluginPerspectiveManager.class ).addPluginPerspective( pluginPerspective );
@@ -556,7 +556,7 @@ public class PentahoSystemPluginManager implements IPluginManager {
     }
   }
 
-  private void registerContentGenerators( IPlatformPlugin plugin, ClassLoader loader,
+  protected void registerContentGenerators( IPlatformPlugin plugin, ClassLoader loader,
                                           final GenericApplicationContext beanFactory )
     throws PlatformPluginRegistrationException {
 
@@ -1142,5 +1142,9 @@ public class PentahoSystemPluginManager implements IPluginManager {
   @Override
   public void addPluginManagerListener( IPluginManagerListener listener ) {
     this.listeners.add( listener );
+  }
+
+  protected ISystemConfig getSystemConfig() {
+    return this.systemConfig;
   }
 }
