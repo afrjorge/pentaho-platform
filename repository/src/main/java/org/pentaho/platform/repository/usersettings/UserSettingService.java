@@ -176,21 +176,30 @@ public class UserSettingService implements IAnyUserSettingService, IUserSettingS
       final Serializable id = repository.getFile( homePath ).getId();
 
       final Map<String, Serializable> fileMetadata = repository.getFileMetadata( id );
+      System.out.println( "1.1 UserSettingService: prev fileMetadata.favorites: " + repository.getFileMetadata( id ));
       fileMetadata.put( SETTING_PREFIX + settingName, settingValue );
       try {
         SecurityHelper.getInstance().runAsSystem( new Callable<Void>() {
           @Override
           public Void call() throws Exception {
+            System.out.println( "1.1.1 UserSettingService synch runAsSystem call: Setting favorites to fileMetadata.favorites: " + fileMetadata.get( SETTING_PREFIX + settingName ) );
             repository.setFileMetadata( id, fileMetadata );
-            return null;
+            System.out.println( "1.1.2 UserSettingService synch runAsSystem call: Finished setting favorites to fileMetadata.favorites: " + fileMetadata.get( SETTING_PREFIX + settingName ) );
+            System.out.println( "1.1.3 UserSettingService synch runAsSystem call: Finished setting favorites repository fileMetadata: " + repository.getFileMetadata( id ).get( SETTING_PREFIX + settingName )  );
+            return null; // getUserSetting( "favorites", null ) != null && !getUserSetting( "favorites", null ).getSettingValue().contains( "analysis_report_empty" )
           }
         } );
+        System.out.println( "1.2 UserSettingService synch: Finished executing runAsSystem fileMetadata.favorites: " + fileMetadata.get( SETTING_PREFIX + settingName ) );
       } catch ( Exception e ) {
         if ( log.isDebugEnabled() ) {
           log.debug( "Error storing user setting for user: " + name + ", setting: " + settingName + ", value: "
             + settingValue, e );
         }
         log.error( "Error storing user setting", e );
+
+        System.out.println( "1.1 !!! UserSettingService failed for settingValue: " + settingValue );
+        System.out.println( "1.2 !!! UserSettingService failed with homePath: " + homePath );
+        System.out.println( e );
       }
     }
   }
