@@ -197,6 +197,15 @@ public class SystemUtilsTest {
   }
 
   @Test
+  public void testValidateAccessToHomeFolder_FolderNameNormalization() {
+    IAuthorizationPolicy mockAuthPolicy = mock( IAuthorizationPolicy.class );
+    /* register  mockAuthPolicy with PentahoSystem so SystemUtils can use it */
+    PentahoSystem.registerObject( mockAuthPolicy );
+
+    assertFalse( SystemUtils.validateAccessToHomeFolder( "/home/testUser2" ) );
+  }
+
+  @Test
   public void testValidateAccessToHomeFolder_NoRepositoryCreateAction() {
     IAuthorizationPolicy mockAuthPolicy = mock( IAuthorizationPolicy.class );
     /* register  mockAuthPolicy with PentahoSystem so SystemUtils can use it */

@@ -15,6 +15,7 @@ package org.pentaho.platform.web.http.api.resources.utils;
 import org.apache.commons.lang.StringUtils;
 import org.pentaho.platform.api.engine.IAuthorizationPolicy;
 import org.pentaho.platform.api.engine.IUserRoleListService;
+import org.pentaho.platform.api.repository2.unified.RepositoryFile;
 import org.pentaho.platform.engine.core.system.PentahoSessionHolder;
 import org.pentaho.platform.engine.core.system.PentahoSystem;
 import org.pentaho.platform.repository2.unified.ServerRepositoryPaths;
@@ -73,20 +74,30 @@ public class SystemUtils {
   public static boolean validateAccessToHomeFolder( String dir ) {
     IAuthorizationPolicy policy = PentahoSystem.get( IAuthorizationPolicy.class );
 
-    boolean usingHomeFolder = false;
     String tenantedUserName = PentahoSessionHolder.getSession().getName();
     //get user home folder path
     String userHomeFolderPath = ServerRepositoryPaths
       .getUserHomeFolderPath( JcrTenantUtils.getUserNameUtils().getTenant( tenantedUserName ),
         JcrTenantUtils.getUserNameUtils().getPrincipleName( tenantedUserName ) );
 
-    if ( userHomeFolderPath != null && !userHomeFolderPath.isEmpty() ) {
-      //we pass the relative path so add serverside root folder for every home folder
-      usingHomeFolder = ( ServerRepositoryPaths.getTenantRootFolderPath() + dir )
-        .startsWith( userHomeFolderPath );
+    if ( userHomeFolderPath == null || userHomeFolderPath.isEmpty() ) {
+      return false;
     }
 
-    return usingHomeFolder && policy.isAllowed( RepositoryCreateAction.NAME )
+    // dir is a relative path so prefix it with the tenant root folder path
+    String dirFullPath = ServerRepositoryPaths.getTenantRootFolderPath() + dir;
+
+    // check if dir is an exact match of the user home folder path
+    if ( dirFullPath.equalsIgnoreCase( userHomeFolderPath ) ) {
+      return policy.isAllowed( RepositoryCreateAction.NAME )
+        && policy.isAllowed( RepositoryReadAction.NAME );
+    }
+
+    // normalize the user home folder path
+    userHomeFolderPath += RepositoryFile.SEPARATOR;
+
+    return dirFullPath.startsWith( userHomeFolderPath )
+      && policy.isAllowed( RepositoryCreateAction.NAME )
       && policy.isAllowed( RepositoryReadAction.NAME );
   }
 }
