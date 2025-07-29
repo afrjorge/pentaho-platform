@@ -74,6 +74,10 @@ public class SystemUtils {
   public static boolean validateAccessToHomeFolder( String dir ) {
     IAuthorizationPolicy policy = PentahoSystem.get( IAuthorizationPolicy.class );
 
+    if ( !policy.isAllowed( RepositoryCreateAction.NAME ) || !policy.isAllowed( RepositoryReadAction.NAME ) ) {
+      return false;
+    }
+
     String tenantedUserName = PentahoSessionHolder.getSession().getName();
     //get user home folder path
     String userHomeFolderPath = ServerRepositoryPaths
@@ -88,16 +92,14 @@ public class SystemUtils {
     String dirFullPath = ServerRepositoryPaths.getTenantRootFolderPath() + dir;
 
     // check if dir is an exact match of the user home folder path
-    if ( dirFullPath.equalsIgnoreCase( userHomeFolderPath ) ) {
-      return policy.isAllowed( RepositoryCreateAction.NAME )
-        && policy.isAllowed( RepositoryReadAction.NAME );
+    if ( !dirFullPath.equalsIgnoreCase( userHomeFolderPath ) ) {
+      // normalize the user home folder path
+      userHomeFolderPath += RepositoryFile.SEPARATOR;
+
+      // check if dir is a subfolder of the user home folder path
+      return dirFullPath.startsWith( userHomeFolderPath );
     }
 
-    // normalize the user home folder path
-    userHomeFolderPath += RepositoryFile.SEPARATOR;
-
-    return dirFullPath.startsWith( userHomeFolderPath )
-      && policy.isAllowed( RepositoryCreateAction.NAME )
-      && policy.isAllowed( RepositoryReadAction.NAME );
+    return true;
   }
 }
