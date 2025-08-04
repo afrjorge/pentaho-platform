@@ -25,6 +25,7 @@ import org.pentaho.platform.api.engine.IUserRoleListService;
 import org.pentaho.platform.api.engine.ObjectFactoryException;
 import org.pentaho.platform.api.mt.ITenant;
 import org.pentaho.platform.api.mt.ITenantedPrincipleNameResolver;
+import org.pentaho.platform.api.repository2.unified.IUnifiedRepository;
 import org.pentaho.platform.engine.core.system.PentahoSessionHolder;
 import org.pentaho.platform.engine.core.system.PentahoSystem;
 import org.pentaho.platform.security.policy.rolebased.actions.AdministerSecurityAction;
@@ -55,6 +56,7 @@ public class SystemUtilsTest {
   @Before
   public void setUp() throws ObjectFactoryException {
 
+    IUnifiedRepository repository = mock( IUnifiedRepository.class );
     PentahoSystem.init();
     ITenant tenant = mock( ITenant.class );
 
@@ -141,19 +143,19 @@ public class SystemUtilsTest {
 
     // Test 3: user loses administer security, but has publish action, should grant access
     doReturn( false ).when( mockAuthPolicy ).isAllowed( AdministerSecurityAction.NAME );
-    assertFalse( SystemUtils.canDownload( "/mock/path" ) );
+    assertFalse( SystemUtils.canUpload( "/mock/path" ) );
 
     // Test 4: user loses administer security, neither does it have publish content, but on ome folder, should grant access
-    assertTrue( SystemUtils.canDownload( USER_HOME_FOLDER ) );
+    assertTrue( SystemUtils.canUpload( USER_HOME_FOLDER ) );
 
     // Test 5: user is on home folder but loses read content, should not grant access
     doReturn( false ).when( mockAuthPolicy ).isAllowed( RepositoryReadAction.NAME );
-    assertFalse( SystemUtils.canDownload( USER_HOME_FOLDER ) );
+    assertFalse( SystemUtils.canUpload( USER_HOME_FOLDER ) );
 
     // Test 5: user is on home folder but loses create content, should not grant access
     doReturn( true ).when( mockAuthPolicy ).isAllowed( RepositoryReadAction.NAME );
     doReturn( false ).when( mockAuthPolicy ).isAllowed( RepositoryCreateAction.NAME );
-    assertFalse( SystemUtils.canDownload( USER_HOME_FOLDER ) );
+    assertFalse( SystemUtils.canUpload( USER_HOME_FOLDER ) );
   }
 
   @Test

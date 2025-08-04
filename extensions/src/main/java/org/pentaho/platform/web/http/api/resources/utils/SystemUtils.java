@@ -15,7 +15,9 @@ package org.pentaho.platform.web.http.api.resources.utils;
 import org.apache.commons.lang.StringUtils;
 import org.pentaho.platform.api.engine.IAuthorizationPolicy;
 import org.pentaho.platform.api.engine.IUserRoleListService;
+import org.pentaho.platform.api.repository2.unified.IUnifiedRepository;
 import org.pentaho.platform.api.repository2.unified.RepositoryFile;
+import org.pentaho.platform.api.repository2.unified.RepositoryFilePermission;
 import org.pentaho.platform.engine.core.system.PentahoSessionHolder;
 import org.pentaho.platform.engine.core.system.PentahoSystem;
 import org.pentaho.platform.repository2.unified.ServerRepositoryPaths;
@@ -24,8 +26,10 @@ import org.pentaho.platform.security.policy.rolebased.actions.AdministerSecurity
 import org.pentaho.platform.security.policy.rolebased.actions.PublishAction;
 import org.pentaho.platform.security.policy.rolebased.actions.RepositoryCreateAction;
 import org.pentaho.platform.security.policy.rolebased.actions.RepositoryReadAction;
+import org.pentaho.platform.util.StringUtil;
 
 import java.util.Collections;
+import java.util.EnumSet;
 import java.util.List;
 
 public class SystemUtils {
@@ -36,45 +40,67 @@ public class SystemUtils {
   }
 
   public static boolean canUpload( String uploadDir ) {
-    IAuthorizationPolicy policy = PentahoSystem.get( IAuthorizationPolicy.class );
-
-    //check if we are admin or have publish permission
-    boolean isAdmin = policy.isAllowed( RepositoryReadAction.NAME ) && policy.isAllowed( RepositoryCreateAction.NAME )
-      && ( policy.isAllowed( AdministerSecurityAction.NAME ) || policy.isAllowed( PublishAction.NAME ) );
-
-    //the user does not have admin or publish permission, so we will check if the user imports to their home folder
-    if ( !isAdmin && !StringUtils.isEmpty( uploadDir ) ) {
-      return validateAccessToHomeFolder( uploadDir );
+    if ( StringUtil.isEmpty( uploadDir ) ) {
+      return false;
     }
 
-    return isAdmin;
+    IUnifiedRepository repo = PentahoSystem.get( IUnifiedRepository.class );
+    // validate if the user has read permission
+    if ( !repo.hasAccess( uploadDir, EnumSet.of( RepositoryFilePermission.WRITE ) ) ) {
+      return false;
+    }
+
+    // check if the folder exists
+    RepositoryFile file = repo.getFile( uploadDir );
+    if ( file == null || !file.isFolder() ) {
+      return false;
+    }
+
+    IAuthorizationPolicy policy = PentahoSystem.get( IAuthorizationPolicy.class );
+
+    // check if the user is admin or has publish permission
+    if ( policy.isAllowed( RepositoryReadAction.NAME )
+      && policy.isAllowed( RepositoryCreateAction.NAME )
+      && ( policy.isAllowed( AdministerSecurityAction.NAME ) || policy.isAllowed( PublishAction.NAME ) ) ) {
+      return true;
+    }
+
+    // check if the user imports to his home folder
+    return validateAccessToHomeFolder( uploadDir );
   }
 
-  public static boolean canDownload( String downloadDir ) {
+  public static boolean canDownload( String path ) {
+    if ( StringUtil.isEmpty( path ) ) {
+      return false;
+    }
+
+    IUnifiedRepository repo = PentahoSystem.get( IUnifiedRepository.class );
+    // validate if the user has read permission
+    if ( !repo.hasAccess( path, EnumSet.of( RepositoryFilePermission.READ ) ) ) {
+      return false;
+    }
+
     IAuthorizationPolicy policy = PentahoSystem.get( IAuthorizationPolicy.class );
 
     IUserRoleListService userRoleListService = PentahoSystem.get( IUserRoleListService.class );
     String tenantedUserName = PentahoSessionHolder.getSession().getName();
     List<String> tenantedUserRoles = userRoleListService.getRolesForUser( JcrTenantUtils.getUserNameUtils().getTenant( tenantedUserName ), tenantedUserName );
 
-    //check if we are admin or have download-roles
-    boolean isAdminOrHaveDownloadActionRole = policy.isAllowed( RepositoryReadAction.NAME )
+    // check if the user is admin or has download-roles
+    if ( policy.isAllowed( RepositoryReadAction.NAME )
       && policy.isAllowed( RepositoryCreateAction.NAME )
       && ( policy.isAllowed( AdministerSecurityAction.NAME )
-      || !Collections.disjoint( tenantedUserRoles, PentahoSystem.getDownloadRolesList() ) );
-
-    //the user does not have admin or download-roles assigned, so we will check if the user downloads from their home folder
-    if ( !isAdminOrHaveDownloadActionRole && !StringUtils.isEmpty( downloadDir ) ) {
-      return validateAccessToHomeFolder( downloadDir );
+        || !Collections.disjoint( tenantedUserRoles, PentahoSystem.getDownloadRolesList() ) ) ) {
+      return true;
     }
 
-    return isAdminOrHaveDownloadActionRole;
+    //the user does not have admin or download-roles assigned, so we will check if the user downloads from their home folder
+    return validateAccessToHomeFolder( path );
   }
 
   public static boolean validateAccessToHomeFolder( String dir ) {
     IAuthorizationPolicy policy = PentahoSystem.get( IAuthorizationPolicy.class );
-
-    if ( !policy.isAllowed( RepositoryCreateAction.NAME ) || !policy.isAllowed( RepositoryReadAction.NAME ) ) {
+    if ( !( policy.isAllowed( RepositoryCreateAction.NAME ) && policy.isAllowed( RepositoryReadAction.NAME ) ) ) {
       return false;
     }
 
@@ -84,22 +110,19 @@ public class SystemUtils {
       .getUserHomeFolderPath( JcrTenantUtils.getUserNameUtils().getTenant( tenantedUserName ),
         JcrTenantUtils.getUserNameUtils().getPrincipleName( tenantedUserName ) );
 
-    if ( userHomeFolderPath == null || userHomeFolderPath.isEmpty() ) {
+    if ( StringUtil.isEmpty( userHomeFolderPath ) ) {
       return false;
     }
 
     // dir is a relative path so prefix it with the tenant root folder path
     String dirFullPath = ServerRepositoryPaths.getTenantRootFolderPath() + dir;
 
-    // check if dir is an exact match of the user home folder path
-    if ( !dirFullPath.equalsIgnoreCase( userHomeFolderPath ) ) {
-      // normalize the user home folder path
-      userHomeFolderPath += RepositoryFile.SEPARATOR;
-
-      // check if dir is a subfolder of the user home folder path
-      return dirFullPath.startsWith( userHomeFolderPath );
+    // check if dir full path is the user home folder path
+    if ( dirFullPath.equals( userHomeFolderPath ) ) {
+      return true;
     }
 
-    return true;
+    // check if dir full path is a subpath of the user home folder path
+    return dirFullPath.startsWith( userHomeFolderPath + RepositoryFile.SEPARATOR );
   }
 }
