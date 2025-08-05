@@ -12,7 +12,6 @@
 
 package org.pentaho.platform.web.http.api.resources.utils;
 
-import org.apache.commons.lang.StringUtils;
 import org.pentaho.platform.api.engine.IAuthorizationPolicy;
 import org.pentaho.platform.api.engine.IUserRoleListService;
 import org.pentaho.platform.api.repository2.unified.IUnifiedRepository;
@@ -35,8 +34,9 @@ import java.util.List;
 public class SystemUtils {
   public static boolean canAdminister() {
     IAuthorizationPolicy policy = PentahoSystem.get( IAuthorizationPolicy.class );
-    return policy.isAllowed( RepositoryReadAction.NAME ) && policy.isAllowed( RepositoryCreateAction.NAME )
-        && ( policy.isAllowed( AdministerSecurityAction.NAME ) );
+    return policy.isAllowed( RepositoryReadAction.NAME )
+      && policy.isAllowed( RepositoryCreateAction.NAME )
+      && policy.isAllowed( AdministerSecurityAction.NAME );
   }
 
   public static boolean canUpload( String uploadDir ) {
@@ -99,8 +99,12 @@ public class SystemUtils {
   }
 
   public static boolean validateAccessToHomeFolder( String dir ) {
+    if ( StringUtil.isEmpty( dir ) ) {
+      return false;
+    }
+
     IAuthorizationPolicy policy = PentahoSystem.get( IAuthorizationPolicy.class );
-    if ( !( policy.isAllowed( RepositoryCreateAction.NAME ) && policy.isAllowed( RepositoryReadAction.NAME ) ) ) {
+    if ( !( policy.isAllowed( RepositoryReadAction.NAME ) && policy.isAllowed( RepositoryCreateAction.NAME ) ) ) {
       return false;
     }
 

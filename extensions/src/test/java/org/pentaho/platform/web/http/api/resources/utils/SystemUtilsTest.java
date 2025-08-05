@@ -17,6 +17,9 @@ import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.ArgumentMatcher;
+import org.mockito.Mock;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
 import org.pentaho.platform.api.engine.IAuthorizationPolicy;
 import org.pentaho.platform.api.engine.IPentahoObjectFactory;
@@ -26,12 +29,19 @@ import org.pentaho.platform.api.engine.ObjectFactoryException;
 import org.pentaho.platform.api.mt.ITenant;
 import org.pentaho.platform.api.mt.ITenantedPrincipleNameResolver;
 import org.pentaho.platform.api.repository2.unified.IUnifiedRepository;
+import org.pentaho.platform.api.repository2.unified.RepositoryFile;
+import org.pentaho.platform.api.repository2.unified.RepositoryFilePermission;
 import org.pentaho.platform.engine.core.system.PentahoSessionHolder;
 import org.pentaho.platform.engine.core.system.PentahoSystem;
+import org.pentaho.platform.repository2.unified.ServerRepositoryPaths;
+import org.pentaho.platform.repository2.unified.jcr.JcrTenantUtils;
 import org.pentaho.platform.security.policy.rolebased.actions.AdministerSecurityAction;
 import org.pentaho.platform.security.policy.rolebased.actions.PublishAction;
 import org.pentaho.platform.security.policy.rolebased.actions.RepositoryCreateAction;
 import org.pentaho.platform.security.policy.rolebased.actions.RepositoryReadAction;
+
+import java.util.EnumSet;
+import java.util.List;
 
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -53,10 +63,26 @@ public class SystemUtilsTest {
 
   private ITenantedPrincipleNameResolver resolver;
 
+  @Mock
+  private IUnifiedRepository repo;
+
+  @Mock
+  private IUserRoleListService userRoleListService;
+
+  private Class<?> anyClass() {
+    return argThat( new AnyClassMatcherTest() );
+  }
+
+  private static class AnyClassMatcherTest implements ArgumentMatcher<Class<?>> {
+    @Override
+    public boolean matches( final Class<?> arg ) {
+      return true;
+    }
+  }
+
   @Before
   public void setUp() throws ObjectFactoryException {
 
-    IUnifiedRepository repository = mock( IUnifiedRepository.class );
     PentahoSystem.init();
     ITenant tenant = mock( ITenant.class );
 
@@ -65,7 +91,7 @@ public class SystemUtilsTest {
     doReturn( USER ).when( resolver ).getPrincipleName( nullable( String.class ) );
     pentahoObjectFactory = mock( IPentahoObjectFactory.class );
     when( pentahoObjectFactory.objectDefined( nullable( String.class ) ) ).thenReturn( true );
-    when( pentahoObjectFactory.get( this.anyClass(), nullable( String.class ), any( IPentahoSession.class ) ) ).thenAnswer(
+    when( pentahoObjectFactory.get( anyClass(), nullable( String.class ), any( IPentahoSession.class ) ) ).thenAnswer(
       invocation -> {
         if ( invocation.getArguments()[0].equals( ITenantedPrincipleNameResolver.class ) ) {
           return resolver;
@@ -75,8 +101,8 @@ public class SystemUtilsTest {
 
     PentahoSystem.registerObjectFactory( pentahoObjectFactory );
 
-    IUserRoleListService userRoleListService = mock( IUserRoleListService.class );
     PentahoSystem.registerObject( userRoleListService );
+    PentahoSystem.registerObject( repo );
 
     IPentahoSession session = mock( IPentahoSession.class );
     doReturn( "sampleSession" ).when( session ).getName();
@@ -90,108 +116,316 @@ public class SystemUtilsTest {
   }
 
   @Test
-  public void testCanDownload() {
+  public void testCanAdminister_NoRepositoryReadAction() {
     IAuthorizationPolicy mockAuthPolicy = mock( IAuthorizationPolicy.class );
-
-    /* register  mockAuthPolicy with PentahoSystem so SystemUtils can use it */
+    doReturn( false ).when( mockAuthPolicy ).isAllowed( RepositoryReadAction.NAME );
     PentahoSystem.registerObject( mockAuthPolicy );
 
-    doReturn( true ).when( mockAuthPolicy ).isAllowed( RepositoryReadAction.NAME ); /* user has 'Read Content' */
-    doReturn( true ).when( mockAuthPolicy ).isAllowed( RepositoryCreateAction.NAME ); /* user has 'Create Content' */
-    /* non-admin user */
-    doReturn( false ).when( mockAuthPolicy ).isAllowed( AdministerSecurityAction.NAME );
-
-    // Test 1: empty folder specified, should not grant access
-    assertFalse( SystemUtils.canDownload( "" ) );
-
-    // Test 2: user gains administer security, should grant access
-    doReturn( true ).when( mockAuthPolicy ).isAllowed( AdministerSecurityAction.NAME );
-    assertTrue( SystemUtils.canDownload( "/mock/path" ) );
-
-    // Test 3: user loses administer security, neither does it have download roles nor it's on home folder shouldn't grant access
-    doReturn( false ).when( mockAuthPolicy ).isAllowed( AdministerSecurityAction.NAME );
-    assertFalse( SystemUtils.canDownload( "/mock/path" ) );
-
-    // Test 4: user loses administer security, neither does it have download roles but it's on home folder, so it should grant access
-    assertTrue( SystemUtils.canDownload( USER_HOME_FOLDER ) );
-
-    // Test 5: user is on home folder but loses read content, should not grant access
-    doReturn( false ).when( mockAuthPolicy ).isAllowed( RepositoryReadAction.NAME );
-    assertFalse( SystemUtils.canDownload( USER_HOME_FOLDER ) );
-
+    assertFalse( SystemUtils.canAdminister() );
   }
 
   @Test
-  public void testCanUpload() {
+  public void testCanAdminister_NoRepositoryCreateAction() {
     IAuthorizationPolicy mockAuthPolicy = mock( IAuthorizationPolicy.class );
-
-    /* register  mockAuthPolicy with PentahoSystem so SystemUtils can use it */
-    PentahoSystem.registerObject( mockAuthPolicy );
-
-    doReturn( true ).when( mockAuthPolicy ).isAllowed( RepositoryReadAction.NAME ); /* user has 'Read Content' */
-    doReturn( true ).when( mockAuthPolicy ).isAllowed( RepositoryCreateAction.NAME ); /* user has 'Create Content' */
-    /* non-admin user */
-    doReturn( false ).when( mockAuthPolicy ).isAllowed( AdministerSecurityAction.NAME );
-    doReturn( false ).when( mockAuthPolicy ).isAllowed( PublishAction.NAME );
-
-    // Test 1: empty folder specified, should not grant access
-    assertFalse( SystemUtils.canUpload( "" ) );
-
-    // Test 2: user gains administer security, should grant access
-    doReturn( true ).when( mockAuthPolicy ).isAllowed( AdministerSecurityAction.NAME );
-    assertTrue( SystemUtils.canUpload( "/mock/path" ) );
-
-    // Test 3: user loses administer security, but has publish action, should grant access
-    doReturn( false ).when( mockAuthPolicy ).isAllowed( AdministerSecurityAction.NAME );
-    assertFalse( SystemUtils.canUpload( "/mock/path" ) );
-
-    // Test 4: user loses administer security, neither does it have publish content, but on ome folder, should grant access
-    assertTrue( SystemUtils.canUpload( USER_HOME_FOLDER ) );
-
-    // Test 5: user is on home folder but loses read content, should not grant access
-    doReturn( false ).when( mockAuthPolicy ).isAllowed( RepositoryReadAction.NAME );
-    assertFalse( SystemUtils.canUpload( USER_HOME_FOLDER ) );
-
-    // Test 5: user is on home folder but loses create content, should not grant access
     doReturn( true ).when( mockAuthPolicy ).isAllowed( RepositoryReadAction.NAME );
     doReturn( false ).when( mockAuthPolicy ).isAllowed( RepositoryCreateAction.NAME );
+    PentahoSystem.registerObject( mockAuthPolicy );
+
+    assertFalse( SystemUtils.canAdminister() );
+  }
+
+  @Test
+  public void testCanAdminister_NoAdministerSecurityAction() {
+    IAuthorizationPolicy mockAuthPolicy = mock( IAuthorizationPolicy.class );
+    doReturn( true ).when( mockAuthPolicy ).isAllowed( RepositoryReadAction.NAME );
+    doReturn( true ).when( mockAuthPolicy ).isAllowed( RepositoryCreateAction.NAME );
+    doReturn( false ).when( mockAuthPolicy ).isAllowed( AdministerSecurityAction.NAME );
+    PentahoSystem.registerObject( mockAuthPolicy );
+
+    assertFalse( SystemUtils.canAdminister() );
+  }
+
+
+  @Test
+  public void testCanAdminister() {
+    IAuthorizationPolicy mockAuthPolicy = mock( IAuthorizationPolicy.class );
+    doReturn( true ).when( mockAuthPolicy ).isAllowed( RepositoryReadAction.NAME );
+    doReturn( true ).when( mockAuthPolicy ).isAllowed( RepositoryCreateAction.NAME );
+    doReturn( true ).when( mockAuthPolicy ).isAllowed( AdministerSecurityAction.NAME );
+    PentahoSystem.registerObject( mockAuthPolicy );
+
+    assertTrue( SystemUtils.canAdminister() );
+  }
+
+  @Test
+  public void testCanUpload_NullPath() {
+    assertFalse( SystemUtils.canUpload( null ) );
+  }
+
+  @Test
+  public void testCanUpload_EmptyPath() {
+    assertFalse( SystemUtils.canUpload( "" ) );
+  }
+
+  @Test
+  public void testCanUpload_NoWriteAcl() {
+    doReturn( false ).when( repo ).hasAccess( USER_HOME_FOLDER, EnumSet.of( RepositoryFilePermission.WRITE ) );
+
     assertFalse( SystemUtils.canUpload( USER_HOME_FOLDER ) );
   }
 
   @Test
-  public void testValidateAccessToHomeFolder() {
-    IAuthorizationPolicy mockAuthPolicy = mock( IAuthorizationPolicy.class );
-    /* register  mockAuthPolicy with PentahoSystem so SystemUtils can use it */
-    PentahoSystem.registerObject( mockAuthPolicy );
+  public void testCanUpload_NoFileFound() {
+    doReturn( true ).when( repo ).hasAccess( USER_HOME_FOLDER, EnumSet.of( RepositoryFilePermission.WRITE ) );
 
+    doReturn( null ).when( repo ).getFile( any( String.class ) );
+
+    assertFalse( SystemUtils.canUpload( USER_HOME_FOLDER ) );
+  }
+
+  @Test
+  public void testCanUpload_NotAFolder() {
+    doReturn( true ).when( repo ).hasAccess( USER_HOME_FOLDER, EnumSet.of( RepositoryFilePermission.WRITE ) );
+
+    RepositoryFile file = mock( RepositoryFile.class );
+    doReturn( false ).when( file ).isFolder();
+    doReturn( file ).when( repo ).getFile( any( String.class ) );
+
+    assertFalse( SystemUtils.canUpload( USER_HOME_FOLDER ) );
+  }
+
+  @Test
+  public void testCanUpload_CanAdministerSecurityAction() {
+    doReturn( true ).when( repo ).hasAccess( USER_HOME_FOLDER, EnumSet.of( RepositoryFilePermission.WRITE ) );
+
+    RepositoryFile file = mock( RepositoryFile.class );
+    doReturn( true ).when( file ).isFolder();
+    doReturn( file ).when( repo ).getFile( any( String.class ) );
+
+    IAuthorizationPolicy mockAuthPolicy = mock( IAuthorizationPolicy.class );
     doReturn( true ).when( mockAuthPolicy ).isAllowed( RepositoryReadAction.NAME );
     doReturn( true ).when( mockAuthPolicy ).isAllowed( RepositoryCreateAction.NAME );
+    doReturn( true ).when( mockAuthPolicy ).isAllowed( AdministerSecurityAction.NAME );
+    PentahoSystem.registerObject( mockAuthPolicy );
 
-    assertTrue( SystemUtils.validateAccessToHomeFolder( USER_HOME_FOLDER ) );
+    assertTrue( SystemUtils.canUpload( USER_HOME_FOLDER ) );
+  }
+
+  @Test
+  public void testCanUpload_CanPublishAction() {
+    doReturn( true ).when( repo ).hasAccess( USER_HOME_FOLDER, EnumSet.of( RepositoryFilePermission.WRITE ) );
+
+    RepositoryFile file = mock( RepositoryFile.class );
+    doReturn( true ).when( file ).isFolder();
+    doReturn( file ).when( repo ).getFile( any( String.class ) );
+
+    IAuthorizationPolicy mockAuthPolicy = mock( IAuthorizationPolicy.class );
+    doReturn( true ).when( mockAuthPolicy ).isAllowed( RepositoryReadAction.NAME );
+    doReturn( true ).when( mockAuthPolicy ).isAllowed( RepositoryCreateAction.NAME );
+    doReturn( false ).when( mockAuthPolicy ).isAllowed( AdministerSecurityAction.NAME );
+    doReturn( true ).when( mockAuthPolicy ).isAllowed( PublishAction.NAME );
+    PentahoSystem.registerObject( mockAuthPolicy );
+
+    assertTrue( SystemUtils.canUpload( USER_HOME_FOLDER ) );
+  }
+
+  @Test
+  public void testCanUpload_NoRepositoryReadAction() {
+    doReturn( true ).when( repo ).hasAccess( USER_HOME_FOLDER, EnumSet.of( RepositoryFilePermission.WRITE ) );
+
+    RepositoryFile file = mock( RepositoryFile.class );
+    doReturn( true ).when( file ).isFolder();
+    doReturn( file ).when( repo ).getFile( any( String.class ) );
+
+    IAuthorizationPolicy mockAuthPolicy = mock( IAuthorizationPolicy.class );
+    doReturn( false ).when( mockAuthPolicy ).isAllowed( RepositoryReadAction.NAME );
+    PentahoSystem.registerObject( mockAuthPolicy );
+
+    assertFalse( SystemUtils.canUpload( USER_HOME_FOLDER ) );
+  }
+
+  @Test
+  public void testCanUpload_NoRepositoryCreateAction() {
+    doReturn( true ).when( repo ).hasAccess( USER_HOME_FOLDER, EnumSet.of( RepositoryFilePermission.WRITE ) );
+
+    RepositoryFile file = mock( RepositoryFile.class );
+    doReturn( true ).when( file ).isFolder();
+    doReturn( file ).when( repo ).getFile( any( String.class ) );
+
+    IAuthorizationPolicy mockAuthPolicy = mock( IAuthorizationPolicy.class );
+    doReturn( true ).when( mockAuthPolicy ).isAllowed( RepositoryReadAction.NAME );
+    doReturn( false ).when( mockAuthPolicy ).isAllowed( RepositoryCreateAction.NAME );
+    PentahoSystem.registerObject( mockAuthPolicy );
+
+    assertFalse( SystemUtils.canUpload( USER_HOME_FOLDER ) );
+  }
+
+  @Test
+  public void testCanUpload_HomeFolder() {
+    doReturn( true ).when( repo ).hasAccess( USER_HOME_FOLDER, EnumSet.of( RepositoryFilePermission.WRITE ) );
+
+    RepositoryFile file = mock( RepositoryFile.class );
+    doReturn( true ).when( file ).isFolder();
+    doReturn( file ).when( repo ).getFile( any( String.class ) );
+
+    IAuthorizationPolicy mockAuthPolicy = mock( IAuthorizationPolicy.class );
+    doReturn( true ).when( mockAuthPolicy ).isAllowed( RepositoryReadAction.NAME );
+    doReturn( true ).when( mockAuthPolicy ).isAllowed( RepositoryCreateAction.NAME );
+    doReturn( false ).when( mockAuthPolicy ).isAllowed( AdministerSecurityAction.NAME );
+    doReturn( false ).when( mockAuthPolicy ).isAllowed( PublishAction.NAME );
+    PentahoSystem.registerObject( mockAuthPolicy );
+
+    assertTrue( SystemUtils.canUpload( USER_HOME_FOLDER ) );
+  }
+
+  @Test
+  public void testCanDownload_NullPath() {
+    assertFalse( SystemUtils.canDownload( null ) );
+  }
+
+  @Test
+  public void testCanDownload_EmptyPath() {
+    assertFalse( SystemUtils.canDownload( "" ) );
+  }
+
+  @Test
+  public void testCanDownload_NoReadAcl() {
+    doReturn( false ).when( repo ).hasAccess( USER_HOME_FOLDER, EnumSet.of( RepositoryFilePermission.READ ) );
+
+    assertFalse( SystemUtils.canDownload( USER_HOME_FOLDER ) );
+  }
+
+  @Test
+  public void testCanDownload_CanAdministerSecurityAction() {
+    doReturn( true ).when( repo ).hasAccess( USER_HOME_FOLDER, EnumSet.of( RepositoryFilePermission.READ ) );
+
+    IAuthorizationPolicy mockAuthPolicy = mock( IAuthorizationPolicy.class );
+    doReturn( true ).when( mockAuthPolicy ).isAllowed( RepositoryReadAction.NAME );
+    doReturn( true ).when( mockAuthPolicy ).isAllowed( RepositoryCreateAction.NAME );
+    doReturn( true ).when( mockAuthPolicy ).isAllowed( AdministerSecurityAction.NAME );
+    PentahoSystem.registerObject( mockAuthPolicy );
+
+    assertTrue( SystemUtils.canDownload( USER_HOME_FOLDER ) );
+  }
+
+  @Test
+  public void testCanDownload_HasDownloadRole() {
+    doReturn( true ).when( repo ).hasAccess( USER_HOME_FOLDER, EnumSet.of( RepositoryFilePermission.READ ) );
+
+    IAuthorizationPolicy mockAuthPolicy = mock( IAuthorizationPolicy.class );
+    doReturn( true ).when( mockAuthPolicy ).isAllowed( RepositoryReadAction.NAME );
+    doReturn( true ).when( mockAuthPolicy ).isAllowed( RepositoryCreateAction.NAME );
+    doReturn( false ).when( mockAuthPolicy ).isAllowed( AdministerSecurityAction.NAME );
+
+    doReturn( List.of( "DownloadRole" ) ).when( userRoleListService ).getRolesForUser( any() , any() );
+
+    try ( MockedStatic<PentahoSystem> pentahoSystem = Mockito.mockStatic( PentahoSystem.class );
+          MockedStatic<JcrTenantUtils> jcrTenantUtils = Mockito.mockStatic( JcrTenantUtils.class ) ) {
+      jcrTenantUtils.when( JcrTenantUtils::getUserNameUtils ).thenReturn( resolver );
+
+      pentahoSystem.when( () -> PentahoSystem.get( ITenantedPrincipleNameResolver.class ) ).thenReturn( resolver );
+      pentahoSystem.when( PentahoSystem::getObjectFactory ).thenReturn( pentahoObjectFactory );
+      pentahoSystem.when( () -> PentahoSystem.get( IAuthorizationPolicy.class ) ).thenReturn( mockAuthPolicy );
+      pentahoSystem.when( () -> PentahoSystem.get( IUserRoleListService.class ) ).thenReturn( userRoleListService );
+      pentahoSystem.when( () -> PentahoSystem.get( IUnifiedRepository.class ) ).thenReturn( repo );
+      pentahoSystem.when( PentahoSystem::getDownloadRolesList ).thenReturn( List.of( "DownloadRole" ) );
+
+      assertTrue( SystemUtils.canDownload( USER_HOME_FOLDER ) );
+    }
+  }
+
+  @Test
+  public void testCanDownload_NoRepositoryReadAction() {
+    doReturn( true ).when( repo ).hasAccess( USER_HOME_FOLDER, EnumSet.of( RepositoryFilePermission.READ ) );
+
+    IAuthorizationPolicy mockAuthPolicy = mock( IAuthorizationPolicy.class );
+    doReturn( false ).when( mockAuthPolicy ).isAllowed( RepositoryReadAction.NAME );
+    PentahoSystem.registerObject( mockAuthPolicy );
+
+    assertFalse( SystemUtils.canDownload( USER_HOME_FOLDER ) );
+  }
+
+  @Test
+  public void testCanDownload_NoRepositoryCreateAction() {
+    doReturn( true ).when( repo ).hasAccess( USER_HOME_FOLDER, EnumSet.of( RepositoryFilePermission.READ ) );
+
+    IAuthorizationPolicy mockAuthPolicy = mock( IAuthorizationPolicy.class );
+    doReturn( true ).when( mockAuthPolicy ).isAllowed( RepositoryReadAction.NAME );
+    doReturn( false ).when( mockAuthPolicy ).isAllowed( RepositoryCreateAction.NAME );
+    PentahoSystem.registerObject( mockAuthPolicy );
+
+    assertFalse( SystemUtils.canDownload( USER_HOME_FOLDER ) );
+  }
+
+  @Test
+  public void testCanDownload_HomeFolder() {
+    doReturn( true ).when( repo ).hasAccess( USER_HOME_FOLDER, EnumSet.of( RepositoryFilePermission.READ ) );
+
+    IAuthorizationPolicy mockAuthPolicy = mock( IAuthorizationPolicy.class );
+    doReturn( true ).when( mockAuthPolicy ).isAllowed( RepositoryReadAction.NAME );
+    doReturn( true ).when( mockAuthPolicy ).isAllowed( RepositoryCreateAction.NAME );
+    PentahoSystem.registerObject( mockAuthPolicy );
+
+    assertTrue( SystemUtils.canDownload( USER_HOME_FOLDER ) );
   }
 
   @Test
   public void testValidateAccessToHomeFolder_Null() {
-    IAuthorizationPolicy mockAuthPolicy = mock( IAuthorizationPolicy.class );
-    /* register  mockAuthPolicy with PentahoSystem so SystemUtils can use it */
-    PentahoSystem.registerObject( mockAuthPolicy );
-
     assertFalse( SystemUtils.validateAccessToHomeFolder( null ) );
   }
 
   @Test
   public void testValidateAccessToHomeFolder_Empty() {
+    assertFalse( SystemUtils.validateAccessToHomeFolder( "" ) );
+  }
+
+  @Test
+  public void testValidateAccessToHomeFolder_NoRepositoryReadAction() {
     IAuthorizationPolicy mockAuthPolicy = mock( IAuthorizationPolicy.class );
-    /* register  mockAuthPolicy with PentahoSystem so SystemUtils can use it */
+    doReturn( false ).when( mockAuthPolicy ).isAllowed( RepositoryReadAction.NAME );
     PentahoSystem.registerObject( mockAuthPolicy );
 
-    assertFalse( SystemUtils.validateAccessToHomeFolder( "" ) );
+    assertFalse( SystemUtils.validateAccessToHomeFolder( USER_HOME_FOLDER ) );
+  }
+
+  @Test
+  public void testValidateAccessToHomeFolder_NoRepositoryCreateAction() {
+    IAuthorizationPolicy mockAuthPolicy = mock( IAuthorizationPolicy.class );
+    doReturn( true ).when( mockAuthPolicy ).isAllowed( RepositoryReadAction.NAME );
+    doReturn( false ).when( mockAuthPolicy ).isAllowed( RepositoryCreateAction.NAME );
+    PentahoSystem.registerObject( mockAuthPolicy );
+
+    assertFalse( SystemUtils.validateAccessToHomeFolder( USER_HOME_FOLDER ) );
+  }
+
+  @Test
+  public void testValidateAccessToHomeFolder_HomeFolderNotFound() {
+    IAuthorizationPolicy mockAuthPolicy = mock( IAuthorizationPolicy.class );
+    doReturn( true ).when( mockAuthPolicy ).isAllowed( RepositoryReadAction.NAME );
+    doReturn( true ).when( mockAuthPolicy ).isAllowed( RepositoryCreateAction.NAME );
+
+    try ( MockedStatic<PentahoSystem> pentahoSystem = Mockito.mockStatic( PentahoSystem.class );
+          MockedStatic<JcrTenantUtils> jcrTenantUtils = Mockito.mockStatic( JcrTenantUtils.class );
+          MockedStatic<ServerRepositoryPaths> serverRepositoryPaths = Mockito.mockStatic( ServerRepositoryPaths.class ) ) {
+      jcrTenantUtils.when( JcrTenantUtils::getUserNameUtils ).thenReturn( resolver );
+      serverRepositoryPaths.when( () -> ServerRepositoryPaths.getUserHomeFolderPath( any(), any() ) ).thenReturn( null );
+      // getTenantRootFolderPath
+      pentahoSystem.when( () -> PentahoSystem.get( ITenantedPrincipleNameResolver.class ) ).thenReturn( resolver );
+      pentahoSystem.when( PentahoSystem::getObjectFactory ).thenReturn( pentahoObjectFactory );
+      pentahoSystem.when( () -> PentahoSystem.get( IAuthorizationPolicy.class ) ).thenReturn( mockAuthPolicy );
+      pentahoSystem.when( () -> PentahoSystem.get( IUserRoleListService.class ) ).thenReturn( userRoleListService );
+      pentahoSystem.when( () -> PentahoSystem.get( IUnifiedRepository.class ) ).thenReturn( repo );
+      pentahoSystem.when( PentahoSystem::getDownloadRolesList ).thenReturn( List.of( "DownloadRole" ) );
+
+      assertFalse( SystemUtils.validateAccessToHomeFolder( USER_HOME_FOLDER ) );
+    }
   }
 
   @Test
   public void testValidateAccessToHomeFolder_NotInHomeFolder() {
     IAuthorizationPolicy mockAuthPolicy = mock( IAuthorizationPolicy.class );
-    /* register  mockAuthPolicy with PentahoSystem so SystemUtils can use it */
+    doReturn( true ).when( mockAuthPolicy ).isAllowed( RepositoryReadAction.NAME );
+    doReturn( true ).when( mockAuthPolicy ).isAllowed( RepositoryCreateAction.NAME );
     PentahoSystem.registerObject( mockAuthPolicy );
 
     // subfolder structure in admin home folder matches the user home folder, must return false
@@ -201,43 +435,30 @@ public class SystemUtilsTest {
   @Test
   public void testValidateAccessToHomeFolder_FolderNameNormalization() {
     IAuthorizationPolicy mockAuthPolicy = mock( IAuthorizationPolicy.class );
-    /* register  mockAuthPolicy with PentahoSystem so SystemUtils can use it */
+    doReturn( true ).when( mockAuthPolicy ).isAllowed( RepositoryReadAction.NAME );
+    doReturn( true ).when( mockAuthPolicy ).isAllowed( RepositoryCreateAction.NAME );
     PentahoSystem.registerObject( mockAuthPolicy );
 
     assertFalse( SystemUtils.validateAccessToHomeFolder( "/home/testUser2" ) );
   }
 
   @Test
-  public void testValidateAccessToHomeFolder_NoRepositoryCreateAction() {
+  public void testValidateAccessToHomeFolder() {
     IAuthorizationPolicy mockAuthPolicy = mock( IAuthorizationPolicy.class );
-    /* register  mockAuthPolicy with PentahoSystem so SystemUtils can use it */
+    doReturn( true ).when( mockAuthPolicy ).isAllowed( RepositoryReadAction.NAME );
+    doReturn( true ).when( mockAuthPolicy ).isAllowed( RepositoryCreateAction.NAME );
     PentahoSystem.registerObject( mockAuthPolicy );
 
-    doReturn( false ).when( mockAuthPolicy ).isAllowed( RepositoryCreateAction.NAME );
-
-    assertFalse( SystemUtils.validateAccessToHomeFolder( USER_HOME_FOLDER ) );
+    assertTrue( SystemUtils.validateAccessToHomeFolder( USER_HOME_FOLDER ) );
   }
 
   @Test
-  public void testValidateAccessToHomeFolder_NoRepositoryReadAction() {
+  public void testValidateAccessToHomeFolderSubpath() {
     IAuthorizationPolicy mockAuthPolicy = mock( IAuthorizationPolicy.class );
-    /* register  mockAuthPolicy with PentahoSystem so SystemUtils can use it */
+    doReturn( true ).when( mockAuthPolicy ).isAllowed( RepositoryReadAction.NAME );
+    doReturn( true ).when( mockAuthPolicy ).isAllowed( RepositoryCreateAction.NAME );
     PentahoSystem.registerObject( mockAuthPolicy );
 
-    doReturn( false ).when( mockAuthPolicy ).isAllowed( RepositoryReadAction.NAME );
-    doReturn( true ).when( mockAuthPolicy ).isAllowed( RepositoryCreateAction.NAME );
-
-    assertFalse( SystemUtils.validateAccessToHomeFolder( USER_HOME_FOLDER ) );
-  }
-
-  private Class<?> anyClass() {
-    return argThat( new AnyClassMatcher() );
-  }
-
-  private static class AnyClassMatcher implements ArgumentMatcher<Class<?>> {
-    @Override
-    public boolean matches( final Class<?> arg ) {
-      return true;
-    }
+    assertTrue( SystemUtils.validateAccessToHomeFolder( USER_HOME_FOLDER + "/subfolder" ) );
   }
 }
