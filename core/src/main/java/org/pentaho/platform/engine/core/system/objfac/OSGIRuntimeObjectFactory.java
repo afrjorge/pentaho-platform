@@ -31,7 +31,6 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Hashtable;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -41,7 +40,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 public class OSGIRuntimeObjectFactory extends RuntimeObjectFactory {
   public static final String REFERENCE_CLASS = "reference_class";
-  private BundleContext bundleContext;
+  private volatile BundleContext bundleContext;
   private AtomicBoolean osgiInitialized = new AtomicBoolean( false );
   private List<OSGIPentahoObjectRegistration> deferredRegistrations = new ArrayList<OSGIPentahoObjectRegistration>();
   private Logger logger = LoggerFactory.getLogger( getClass() );
@@ -54,34 +53,54 @@ public class OSGIRuntimeObjectFactory extends RuntimeObjectFactory {
     this.bundleContext = bundleContext;
     // Migrate previously registered entries to OSGI
 
-    Iterator<OSGIPentahoObjectRegistration> iterator = deferredRegistrations.iterator();
+    List<OSGIPentahoObjectRegistration> pending;
     synchronized ( deferredRegistrations ) {
-      while ( iterator.hasNext() ) {
-        OSGIPentahoObjectRegistration osgiPentahoObjectRegistration = iterator.next();
-        ObjectRegistration deferredRegistration = osgiPentahoObjectRegistration.iPentahoObjectRegistration;
-        Class<?>[] classes = deferredRegistration.getPublishedClasses()
-            .toArray( new Class<?>[ deferredRegistration.getPublishedClasses().size() ] );
-        this.registerReference( deferredRegistration.getReference(), osgiPentahoObjectRegistration, classes );
-        iterator.remove();
-      }
+      pending = new ArrayList<OSGIPentahoObjectRegistration>( deferredRegistrations );
+      deferredRegistrations.clear();
+    }
+
+    // Replayed outside of the lock: a replay may itself defer again (if the new context is already
+    // invalid), which would otherwise modify the list being iterated.
+    for ( OSGIPentahoObjectRegistration osgiPentahoObjectRegistration : pending ) {
+      ObjectRegistration deferredRegistration = osgiPentahoObjectRegistration.iPentahoObjectRegistration;
+      Class<?>[] classes = deferredRegistration.getPublishedClasses()
+          .toArray( new Class<?>[ deferredRegistration.getPublishedClasses().size() ] );
+      this.registerReference( deferredRegistration.getReference(), osgiPentahoObjectRegistration, classes );
     }
     osgiInitialized.set( true );
 
 
   }
 
+  /**
+   * [PDI-20686] Answers whether the current {@link BundleContext} can still be used.
+   * <p>
+   * The context is a static, process-wide reference handed over once by the bundle that bridges the
+   * PentahoSystem to OSGI. When that bundle is stopped - which happens on every bundle refresh, for
+   * instance while a KAR is being un/redeployed into a running instance - its context is invalidated,
+   * but this factory keeps holding it until the bundle comes back and hands over a new one. Using the
+   * stale context throws {@code IllegalStateException: Invalid BundleContext}, which, when it happens
+   * inside a bundle activator, aborts that bundle's activation.
+   */
+  private boolean isBundleContextUsable() {
+    BundleContext context = this.bundleContext;
+    if ( context == null ) {
+      return false;
+    }
+    try {
+      context.getBundle();
+      return true;
+    } catch ( IllegalStateException e ) {
+      return false;
+    }
+  }
+
   public <T> IPentahoObjectRegistration registerReference( final IPentahoObjectReference<?> reference,
                                                            OSGIPentahoObjectRegistration existingRegistration,
                                                            Class<?>... classes ) {
 
-    if ( this.bundleContext == null ) {
-      ObjectRegistration runtimeRegistration = (ObjectRegistration) super.registerReference( reference, classes );
-      OSGIPentahoObjectRegistration osgiPentahoObjectRegistration =
-          new OSGIPentahoObjectRegistration( runtimeRegistration );
-      synchronized ( deferredRegistrations ) {
-        deferredRegistrations.add( osgiPentahoObjectRegistration );
-      }
-      return osgiPentahoObjectRegistration;
+    if ( !isBundleContextUsable() ) {
+      return deferRegistration( reference, existingRegistration, classes );
     }
     Hashtable<String, Object> hashtable = new Hashtable<String, Object>();
     hashtable.putAll( reference.getAttributes() );
@@ -123,6 +142,13 @@ public class OSGIRuntimeObjectFactory extends RuntimeObjectFactory {
         }
       } catch ( ClassCastException e ) {
         logger.error( "Error Retriving object from OSGI, Class is not as expected", e );
+      } catch ( IllegalStateException e ) {
+        // [PDI-20686] The context was invalidated while we were registering. Undo whatever made it in and
+        // hold the registration until a valid context is handed over.
+        logger.warn( "The OSGI BundleContext is no longer valid. Deferring the registration of "
+            + aClass.getName() + " until it is restored.", e );
+        unregisterQuietly( registrations );
+        return deferRegistration( reference, existingRegistration, classes );
       }
     }
     if ( existingRegistration != null ) {
@@ -139,8 +165,42 @@ public class OSGIRuntimeObjectFactory extends RuntimeObjectFactory {
     return this.registerReference( reference, null, classes );
   }
 
+  /**
+   * Registers the reference on the plain (non-OSGI) factory and queues it, so that it is published to OSGI
+   * by the next {@link #setBundleContext(BundleContext)}. Used both before OSGI is available and, since
+   * [PDI-20686], whenever the context in hand has been invalidated by a bundle refresh.
+   */
+  private IPentahoObjectRegistration deferRegistration( IPentahoObjectReference<?> reference,
+                                                        OSGIPentahoObjectRegistration existingRegistration,
+                                                        Class<?>... classes ) {
+    OSGIPentahoObjectRegistration osgiPentahoObjectRegistration = existingRegistration;
+    if ( osgiPentahoObjectRegistration == null ) {
+      osgiPentahoObjectRegistration =
+          new OSGIPentahoObjectRegistration( (ObjectRegistration) super.registerReference( reference, classes ) );
+    } else if ( osgiPentahoObjectRegistration.iPentahoObjectRegistration == null ) {
+      // Already published to OSGI once: it is only held on the non-OSGI factory again if that publication
+      // has since been undone.
+      osgiPentahoObjectRegistration
+          .setDeferredRegistration( (ObjectRegistration) super.registerReference( reference, classes ) );
+    }
+    synchronized ( deferredRegistrations ) {
+      deferredRegistrations.add( osgiPentahoObjectRegistration );
+    }
+    return osgiPentahoObjectRegistration;
+  }
+
+  private void unregisterQuietly( List<ServiceRegistration<?>> registrations ) {
+    for ( ServiceRegistration<?> registration : registrations ) {
+      try {
+        registration.unregister();
+      } catch ( IllegalStateException e ) {
+        logger.debug( "Error on Unregistering the service, it seems already be unregistered", e );
+      }
+    }
+  }
+
   @Override public boolean objectDefined( Class<?> clazz ) {
-    if ( this.bundleContext == null || !osgiInitialized.get() ) {
+    if ( !osgiInitialized.get() || !isBundleContextUsable() ) {
       return super.objectDefined( clazz );
     }
     // Look for IPentahoObjectReference first
@@ -151,19 +211,19 @@ public class OSGIRuntimeObjectFactory extends RuntimeObjectFactory {
       if ( serviceReferences != null && serviceReferences.size() > 0 ) {
         return true;
       }
+      // try by the classname
+      return this.bundleContext.getServiceReference( clazz ) != null;
     } catch ( IllegalStateException ise ) {
       // caused by the bundleContext being invalid
       return false;
     } catch ( InvalidSyntaxException e ) {
       throw new IllegalStateException( "Error finding reference in OSGI" );
     }
-    // try by the classname
-    return this.bundleContext.getServiceReference( clazz ) != null;
   }
 
   @Override
   protected <T> List<IPentahoObjectReference<?>> getReferencesByQuery( Class<T> type, Map<String, String> query ) {
-    if ( this.bundleContext == null || !osgiInitialized.get() ) {
+    if ( !osgiInitialized.get() || !isBundleContextUsable() ) {
       return super.getReferencesByQuery( type, query );
     }
     return Collections.emptyList();
@@ -188,20 +248,18 @@ public class OSGIRuntimeObjectFactory extends RuntimeObjectFactory {
         iPentahoObjectRegistration.remove();
       }
 
-      for ( ServiceRegistration<?> registration : registrations ) {
-        try {
-          registration.unregister();
-        } catch ( IllegalStateException e ) {
-          // May already have been unregistered during the shutdown sequence.
-          logger.debug( "Error on Unregistering the service, it seems already be unregistered", e );
-        }
-      }
+      unregisterQuietly( registrations );
 
     }
 
     public void setRegistrations( List<ServiceRegistration<?>> registrations ) {
       this.registrations = registrations;
       this.iPentahoObjectRegistration = null;
+    }
+
+    public void setDeferredRegistration( ObjectRegistration iPentahoObjectRegistration ) {
+      this.iPentahoObjectRegistration = iPentahoObjectRegistration;
+      this.registrations = new ArrayList<ServiceRegistration<?>>();
     }
   }
 }

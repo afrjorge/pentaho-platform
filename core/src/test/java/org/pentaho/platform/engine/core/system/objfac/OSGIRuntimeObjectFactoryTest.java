@@ -33,8 +33,10 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -114,6 +116,82 @@ public class OSGIRuntimeObjectFactoryTest {
     iPentahoObjectRegistration.remove();
     verify( registration, times( 1 ) ).unregister();
 
+  }
+
+  /**
+   * [PDI-20686] A bundle refresh invalidates the BundleContext this factory holds. Registering against it
+   * must not propagate the IllegalStateException - that aborts the activation of whichever bundle happens
+   * to be registering - it must fall back to the non-OSGI factory instead.
+   */
+  @Test
+  public void testRegisterReferenceHeldWhenBundleContextIsInvalid() throws Exception {
+    objectFactory.setBundleContext( bundleContext );
+    when( bundleContext.getBundle() ).thenThrow( new IllegalStateException( "Invalid BundleContext." ) );
+
+    SingletonPentahoObjectReference<String> ref = new SingletonPentahoObjectReference<>( String.class, "Testing",
+      Collections.singletonMap( "foo", "bar" ), 10 );
+    objectFactory.registerReference( ref, String.class );
+
+    verify( bundleContext, never() ).registerService( anyString(), any(), any( Dictionary.class ) );
+    assertEquals( "Testing", objectFactory.get( String.class, null ) );
+  }
+
+  /**
+   * [PDI-20686] And once the bundle that owns the context comes back, the held registration is published.
+   */
+  @Test
+  public void testRegistrationHeldWhileInvalidIsReplayedOnTheNextBundleContext() {
+    objectFactory.setBundleContext( bundleContext );
+    when( bundleContext.getBundle() ).thenThrow( new IllegalStateException( "Invalid BundleContext." ) );
+
+    SingletonPentahoObjectReference<String> ref = new SingletonPentahoObjectReference<>( String.class, "Testing",
+      Collections.singletonMap( "foo", "bar" ), 10 );
+    objectFactory.registerReference( ref, String.class );
+
+    BundleContext newBundleContext = mock( BundleContext.class );
+    objectFactory.setBundleContext( newBundleContext );
+
+    ArgumentCaptor<ServiceFactory> serviceFactoryArgumentCaptor = ArgumentCaptor.forClass( ServiceFactory.class );
+    verify( newBundleContext ).registerService( eq( String.class.getName() ), serviceFactoryArgumentCaptor.capture(),
+        any( Dictionary.class ) );
+    assertEquals( "Testing", serviceFactoryArgumentCaptor.getValue().getService( null, null ) );
+  }
+
+  /**
+   * [PDI-20686] The context may also be invalidated between the check and the call.
+   */
+  @Test
+  public void testRegisterReferenceHeldWhenBundleContextGoesInvalidMidRegistration() throws Exception {
+    objectFactory.setBundleContext( bundleContext );
+    when( bundleContext.registerService( eq( String.class.getName() ), any(), any( Dictionary.class ) ) )
+        .thenThrow( new IllegalStateException( "Invalid BundleContext." ) );
+
+    SingletonPentahoObjectReference<String> ref = new SingletonPentahoObjectReference<>( String.class, "Testing",
+      Collections.singletonMap( "foo", "bar" ), 10 );
+    objectFactory.registerReference( ref, String.class );
+
+    BundleContext newBundleContext = mock( BundleContext.class );
+    objectFactory.setBundleContext( newBundleContext );
+    verify( newBundleContext ).registerService( eq( String.class.getName() ), any( ServiceFactory.class ),
+        any( Dictionary.class ) );
+  }
+
+  /**
+   * [PDI-20686] Lookups must degrade to the non-OSGI factory while the context is invalid, rather than
+   * throwing. {@code getServiceReference} used to sit outside the guarded block.
+   */
+  @Test
+  public void testObjectDefinedFallsBackWhenBundleContextIsInvalid() throws Exception {
+    SingletonPentahoObjectReference<String> ref = new SingletonPentahoObjectReference<>( String.class, "Testing",
+      Collections.singletonMap( "foo", "bar" ), 10 );
+    objectFactory.registerReference( ref, String.class );
+    objectFactory.setBundleContext( bundleContext );
+
+    when( bundleContext.getBundle() ).thenThrow( new IllegalStateException( "Invalid BundleContext." ) );
+
+    assertTrue( objectFactory.objectDefined( String.class ) );
+    assertFalse( objectFactory.objectDefined( Integer.class ) );
+    assertEquals( "Testing", objectFactory.get( String.class, null ) );
   }
 
 }
