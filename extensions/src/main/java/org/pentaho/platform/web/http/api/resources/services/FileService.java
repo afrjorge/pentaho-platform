@@ -62,6 +62,7 @@ import org.pentaho.platform.plugin.services.importexport.RepositoryTextLayout;
 import org.pentaho.platform.plugin.services.importexport.ExportHandler;
 import org.pentaho.platform.plugin.services.importexport.IRepositoryImportLogger;
 import org.pentaho.platform.plugin.services.importexport.ImportSession;
+import org.pentaho.platform.plugin.services.importexport.SessionExpirationDetector;
 import org.pentaho.platform.plugin.services.importexport.SimpleExportProcessor;
 import org.pentaho.platform.plugin.services.importexport.ZipExportProcessor;
 import org.pentaho.platform.repository.RepositoryDownloadWhitelist;
@@ -147,6 +148,18 @@ public class FileService {
 
   private PentahoPlatformExporter backupExporter;
 
+  private SessionExpirationDetector sessionExpirationDetector = new SessionExpirationDetector();
+
+  /**
+   * Replaces the detector used to identify HTTP sessions that expired while a long-running restore was in progress.
+   * This injection point allows callers and tests to customize session-expiration detection.
+   *
+   * @param sessionExpirationDetector the detector to use
+   */
+  public void setSessionExpirationDetector( SessionExpirationDetector sessionExpirationDetector ) {
+    this.sessionExpirationDetector = sessionExpirationDetector;
+  }
+
   private void validateFilePath( String logFile ) throws IllegalArgumentException {
     if ( logFile.contains( ".." ) || logFile.contains( "//" ) || logFile.contains( "\\\\" ) || ( !logFile.endsWith( ".txt" ) && !logFile.endsWith( ".log" ) ) ) {
       throw new IllegalArgumentException( Messages.getInstance().getString( "FileService.ERROR_INVALID_LOG_FILENAME", logFile ) );
@@ -208,6 +221,37 @@ public class FileService {
     return new FileOutputStream( fallbacklogFilePath );
   }
 
+  /**
+   * Restores repository content and platform configuration from a system backup bundle.
+   * <p>
+   * The restore log is finalized and written on both success and failure. If the backing HTTP session expires while
+   * the synchronous restore is running, an actionable explanation is added to that log and a
+   * {@link PlatformImportException} tagged {@link PlatformImportException#SESSION_EXPIRED} is thrown so the REST layer
+   * does not report a false success. Unrelated checked and runtime import failures are propagated unchanged.
+   * <p>
+   * Two consequences of that ordering are intentional and worth knowing before changing this method:
+   * <ul>
+   *   <li>When an unrelated failure is propagating <em>and</em> the session also expired, the restore log records the
+   *       session expiration while the caller receives the unrelated failure. The log explains why the restored
+   *       content is incomplete; the caller is told what actually interrupted the operation.</li>
+   *   <li>Session detection relies on {@link PentahoSessionHolder#getSession()} returning the session bound to the
+   *       request thread. If this method is ever invoked outside a servlet request, or with a detached session, the
+   *       probe silently reports "not expired" and the pre-fix false success returns. See
+   *       {@link org.pentaho.platform.plugin.services.importexport.SessionExpirationDetector#isSessionExpired}.</li>
+   * </ul>
+   *
+   * @param fileUpload the system backup bundle stream
+   * @param overwriteFile whether existing repository files should be overwritten; defaults to {@code true}
+   * @param applyAclSettings whether access-control settings from the bundle should be applied; defaults to {@code true}
+   * @param overwriteAclSettings whether existing access-control settings should be overwritten; defaults to
+   *                             {@code false}
+   * @param logFile the destination restore-log path
+   * @param logLevel the repository import log level
+   * @param backupBundlePath the original backup bundle path or name
+   * @throws IllegalArgumentException if the log path or log level is invalid
+   * @throws PlatformImportException if the restore cannot complete, including when its HTTP session expires
+   * @throws SecurityException if the current user cannot administer the platform
+   */
   public void systemRestore( final InputStream fileUpload, String overwriteFile,
                              String applyAclSettings, String overwriteAclSettings, String logFile, String logLevel, String backupBundlePath ) throws IllegalArgumentException, PlatformImportException, SecurityException {
     if ( doCanAdminister() ) {
@@ -251,18 +295,136 @@ public class FileService {
       RepositoryTextLayout stringLayout = new RepositoryTextLayout( level );
       importLogger.setPerformingRestore( true );
       importLogger.startJob( importLoggerStream, importDirectory, level, stringLayout );
+      boolean sessionExpired = false;
+      Throwable expirationFailure = null;
       try {
         importer.importFile( bundleBuilder.build() );
-      } finally {
-        importLogger.endJob();
-        try {
-          importLoggerStream.writeTo( fileOutputStream );
-        } catch ( IOException e ) {
-          e.printStackTrace();
+      } catch ( PlatformImportException e ) {
+        sessionExpired = sessionExpirationDetector.isCausedBySessionExpiration( e );
+        if ( !sessionExpired ) {
+          throw e;
         }
+        expirationFailure = recordSessionExpirationFailure( e );
+      } catch ( RuntimeException e ) {
+        sessionExpired = sessionExpirationDetector.isCausedBySessionExpiration( e );
+        if ( !sessionExpired ) {
+          throw e;
+        }
+        expirationFailure = recordSessionExpirationFailure( e );
+      } finally {
+        // Every statement here must be total. This block runs while a failure may already be propagating, and it owns
+        // both the restore log's completion and the flush of that log to disk. Anything throwing out of here would
+        // replace the in-flight failure and leave the log unwritten and its descriptor open.
+        //
+        // The probe runs unconditionally, including while an unrelated failure is propagating. That is deliberate: if
+        // the session really did expire, every import step after that point was rejected for that reason, so the
+        // restore log must say so even though the caller will be told about the unrelated failure instead. The log and
+        // the console can therefore disagree, and the log is the one that reflects why the content is incomplete.
+        sessionExpired = sessionExpired || probeSessionExpiration();
+        if ( sessionExpired ) {
+          logSessionExpirationToRestoreLog( importLogger );
+        }
+        endRestoreLog( importLogger );
+        try ( FileOutputStream outputStream = fileOutputStream ) {
+          importLoggerStream.writeTo( outputStream );
+        } catch ( IOException e ) {
+          logger.error( e.getLocalizedMessage(), e );
+        }
+      }
+      if ( sessionExpired ) {
+        // SESSION_EXPIRED marks the message as a curated explanation that the REST layer may return to the client. The
+        // failure that revealed the expiration is chained so the server log keeps the stack showing which layer
+        // rejected the invalidated session; it is null when only the final session probe detected the expiration.
+        throw new PlatformImportException( Messages.getInstance().getString( "FileService.ERROR_RESTORE_SESSION_EXPIRED" ),
+          PlatformImportException.SESSION_EXPIRED, expirationFailure );
       }
     } else {
       throw new SecurityException();
+    }
+  }
+
+  /**
+   * Logs an import failure that is being replaced by the curated session-expiration message and returns it so it can
+   * be chained as the cause. Without this the original stack trace, which identifies the layer that rejected the
+   * invalidated session, would be lost entirely.
+   *
+   * @param importFailure the failure that revealed the session expiration
+   * @return the same failure, for chaining
+   */
+  private Throwable recordSessionExpirationFailure( Throwable importFailure ) {
+    logger.error( Messages.getInstance().getString( "FileService.ERROR_RESTORE_SESSION_EXPIRED" ), importFailure );
+    return importFailure;
+  }
+
+  /**
+   * Writes the session-expiration explanation into the restore log without ever throwing.
+   * <p>
+   * This runs in a {@code finally} block, before {@code endJob()} and before the log is flushed to disk, and possibly
+   * while another failure is already propagating. A failing import logger must therefore not skip those steps or
+   * replace the in-flight failure, so the failure is reported to the server log and swallowed: at that point the
+   * restore log is the very thing that cannot be written, leaving nowhere else to record it.
+   *
+   * @param importLogger the restore log to write to
+   */
+  private void logSessionExpirationToRestoreLog( IRepositoryImportLogger importLogger ) {
+    try {
+      importLogger.error( Messages.getInstance().getString( "FileService.ERROR_RESTORE_SESSION_EXPIRED" ) );
+    } catch ( Throwable loggingFailure ) {
+      reportRestoreLogFailure( "FileService.ERROR_UNABLE_TO_RECORD_SESSION_EXPIRATION", loggingFailure );
+    }
+  }
+
+  /**
+   * Probes the current session for expiration without ever throwing.
+   * <p>
+   * Runs in a {@code finally} block, so a failure of the probe itself must not replace the in-flight failure nor skip
+   * the completion and flush of the restore log. The detector only classifies {@link IllegalStateException} as an
+   * expiry signal, so any other failure is inconclusive and is reported as "not expired": claiming expiry on the
+   * strength of an unrelated error would put a misleading explanation into the restore log.
+   *
+   * @return {@code true} only when the session is known to have been invalidated
+   */
+  private boolean probeSessionExpiration() {
+    try {
+      return sessionExpirationDetector.isSessionExpired( PentahoSessionHolder.getSession() );
+    } catch ( Throwable probeFailure ) {
+      reportRestoreLogFailure( "FileService.ERROR_UNABLE_TO_PROBE_SESSION", probeFailure );
+      return false;
+    }
+  }
+
+  /**
+   * Completes the restore log without ever throwing.
+   * <p>
+   * Runs in a {@code finally} block, immediately before the log is flushed to disk. The import logger is pluggable, and
+   * an implementation that fails here would otherwise both mask the in-flight failure and skip the flush, losing the
+   * log and the diagnosis together — so the failure is reported to the server log and swallowed.
+   *
+   * @param importLogger the restore log to complete
+   */
+  private void endRestoreLog( IRepositoryImportLogger importLogger ) {
+    try {
+      importLogger.endJob();
+    } catch ( Throwable endJobFailure ) {
+      reportRestoreLogFailure( "FileService.ERROR_UNABLE_TO_COMPLETE_RESTORE_LOG", endJobFailure );
+    }
+  }
+
+  /**
+   * Reports a failure of the restore-log machinery to the server log, without ever throwing.
+   * <p>
+   * The callers are the total helpers used by the {@code systemRestore(...)} {@code finally} block, so this is their
+   * last line of defence: resolving the message or writing to the server log must not be able to escape and mask the
+   * failure the caller is about to propagate. If even that fails there is nowhere left to report it, so it is dropped.
+   *
+   * @param messageKey the message bundle key describing what could not be done
+   * @param failure the failure to report
+   */
+  private void reportRestoreLogFailure( String messageKey, Throwable failure ) {
+    try {
+      logger.error( Messages.getInstance().getString( messageKey ), failure );
+    } catch ( Throwable reportingFailure ) {
+      // Intentionally ignored - see the method javadoc.
     }
   }
 

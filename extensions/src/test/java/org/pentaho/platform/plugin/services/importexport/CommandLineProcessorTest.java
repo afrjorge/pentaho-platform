@@ -46,6 +46,8 @@ import org.junit.FixMethodOrder;
 
 import org.mockito.MockedStatic;
 import org.pentaho.platform.engine.core.output.MultiOutputStream;
+import org.pentaho.platform.plugin.services.importer.PlatformImportException;
+import org.pentaho.platform.plugin.services.messages.Messages;
 import org.pentaho.platform.plugin.services.importexport.CommandLineProcessor.RequestType;
 
 import static org.mockito.ArgumentMatchers.any;
@@ -148,6 +150,85 @@ public class CommandLineProcessorTest extends Assert {
       throw new RuntimeException( "Constructor 'CommandLineProcessor' broken" );
     }
   }
+
+  @Test
+  public void describeThrowableStopsAtCircularCauseChain() throws Exception {
+    CommandLineProcessor commandLineProcessor = createCommandLineProcessor( "restore", null );
+    Throwable first = new RuntimeException( "first" );
+    Throwable second = new RuntimeException( "second", first );
+    first.initCause( second );
+
+    assertEquals( "RuntimeException: first -> RuntimeException: second",
+      commandLineProcessor.describeThrowable( first ) );
+  }
+
+  // region BISERVER-15532 - HTTP 500 reporting for --restore
+
+  private Response mockServerErrorResponse( MediaType mediaType, String body ) {
+    Response response = mock( Response.class );
+    when( response.getStatus() ).thenReturn( Response.Status.INTERNAL_SERVER_ERROR.getStatusCode() );
+    when( response.hasEntity() ).thenReturn( true );
+    when( response.getMediaType() ).thenReturn( mediaType );
+    when( response.readEntity( String.class ) ).thenReturn( body );
+    return response;
+  }
+
+  @Test
+  public void logResponseMessageAppendsCuratedPlainTextServerError() throws ParseException {
+    CommandLineProcessor commandLineProcessor = createCommandLineProcessor( "restore", null );
+    Response response = mockServerErrorResponse( MediaType.TEXT_PLAIN_TYPE, "the HTTP session expired" );
+
+    commandLineProcessor.logResponseMessage( null, "/tmp/backup.zip", response, RequestType.RESTORE );
+
+    String console = CONSOLE_BUFFER.toString();
+    assertTrue( console.contains( "the HTTP session expired" ) );
+    assertTrue( console.contains( "did not complete successfully" ) );
+  }
+
+  @Test
+  public void logResponseMessageDropsContainerRenderedErrorPage() throws ParseException {
+    CommandLineProcessor commandLineProcessor = createCommandLineProcessor( "restore", null );
+    Response response =
+      mockServerErrorResponse( MediaType.TEXT_HTML_TYPE, "<html><body><h1>HTTP Status 500</h1></body></html>" );
+
+    commandLineProcessor.logResponseMessage( null, "/tmp/backup.zip", response, RequestType.RESTORE );
+
+    String console = CONSOLE_BUFFER.toString();
+    assertFalse( console.contains( "<html>" ) );
+    assertFalse( console.contains( "HTTP Status 500" ) );
+    assertFalse( console.contains( "The server reported the following error" ) );
+    assertTrue( console.contains( "The server did not report a reason" ) );
+  }
+
+  @Test
+  public void logResponseMessageReportsServerErrorWithoutBody() throws ParseException {
+    CommandLineProcessor commandLineProcessor = createCommandLineProcessor( "restore", null );
+    Response response = mock( Response.class );
+    when( response.getStatus() ).thenReturn( Response.Status.INTERNAL_SERVER_ERROR.getStatusCode() );
+    when( response.hasEntity() ).thenReturn( false );
+
+    commandLineProcessor.logResponseMessage( null, "/tmp/backup.zip", response, RequestType.RESTORE );
+
+    assertTrue( CONSOLE_BUFFER.toString().contains( "The server did not report a reason" ) );
+  }
+
+  @Test
+  public void logResponseMessageKeepsDatasourceDetailOnImportServerError() throws ParseException {
+    // A datasource import failure is reported as HTTP 500 by data-access (see ResourceUtil and MetadataResource), and
+    // its body carries the PlatformImportException status code. That diagnosis must survive the 500 handling.
+    CommandLineProcessor commandLineProcessor = createCommandLineProcessor( "i", null );
+    Response response = mockServerErrorResponse( MediaType.TEXT_PLAIN_TYPE,
+      String.valueOf( PlatformImportException.PUBLISH_DATASOURCE_ERROR ) );
+
+    commandLineProcessor.logResponseMessage( null, "/public", response, RequestType.IMPORT );
+
+    String console = CONSOLE_BUFFER.toString();
+    assertTrue( console.contains( Messages.getInstance()
+      .getString( "CommandLineProcessor.DATASOURCE_IMPORT_CONNECTION_ERROR" ) ) );
+    assertFalse( console.contains( "The server did not report a reason" ) );
+  }
+
+  // endregion
 
   @Test
   public void get002PrintHelpTest() throws IllegalAccessException {

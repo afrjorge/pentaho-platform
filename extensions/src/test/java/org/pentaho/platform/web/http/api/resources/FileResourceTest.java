@@ -39,6 +39,7 @@ import org.pentaho.platform.engine.core.solution.SimpleParameterProvider;
 import org.pentaho.platform.engine.core.system.PentahoSystem;
 import org.pentaho.platform.plugin.services.importexport.Exporter;
 import org.pentaho.platform.plugin.services.importexport.StreamConverter;
+import org.pentaho.platform.plugin.services.importer.PlatformImportException;
 import org.pentaho.platform.repository2.unified.fileio.RepositoryFileOutputStream;
 import org.pentaho.platform.repository2.unified.webservices.DefaultUnifiedRepositoryWebService;
 import org.pentaho.platform.security.policy.rolebased.actions.PublishAction;
@@ -50,6 +51,7 @@ import org.springframework.beans.factory.NoSuchBeanDefinitionException;
 
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.ws.rs.WebApplicationException;
+import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.StreamingOutput;
@@ -2037,4 +2039,32 @@ public class FileResourceTest {
       }
     }
   }
+
+  // region BISERVER-15532 - restore failure response body
+
+  @Test
+  public void testBuildRestoreFailureResponseExplainsSessionExpiration() {
+    PlatformImportException sessionExpired = new PlatformImportException( "the HTTP session expired",
+      PlatformImportException.SESSION_EXPIRED );
+
+    try ( Response response = fileResource.buildRestoreFailureResponse( sessionExpired ) ) {
+      assertEquals( INTERNAL_SERVER_ERROR.getStatusCode(), response.getStatus() );
+      assertEquals( MediaType.TEXT_PLAIN_TYPE, response.getMediaType() );
+      assertEquals( "the HTTP session expired", response.getEntity() );
+    }
+  }
+
+  @Test
+  public void testBuildRestoreFailureResponseHidesUnrelatedImportFailureDetail() {
+    PlatformImportException unrelated = new PlatformImportException( "exception while getting file with path /home",
+      PlatformImportException.PUBLISH_GENERAL_ERROR );
+
+    try ( Response response = fileResource.buildRestoreFailureResponse( unrelated ) ) {
+      assertEquals( INTERNAL_SERVER_ERROR.getStatusCode(), response.getStatus() );
+      assertNull( response.getEntity() );
+      assertNull( response.getMediaType() );
+    }
+  }
+
+  // endregion
 }

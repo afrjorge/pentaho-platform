@@ -15,9 +15,14 @@
 package org.pentaho.platform.web.http.api.resources.services;
 
 import org.apache.commons.lang3.RandomStringUtils;
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.Appender;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
+import org.pentaho.platform.api.util.LogUtil;
 import org.pentaho.platform.api.engine.IPentahoObjectFactory;
 import org.pentaho.platform.api.engine.IPentahoObjectReference;
 import org.pentaho.platform.api.engine.IPentahoSession;
@@ -28,15 +33,24 @@ import org.pentaho.platform.api.engine.IAuthorizationPolicy;
 import org.pentaho.platform.api.engine.PentahoAccessControlException;
 import org.pentaho.platform.api.repository2.unified.RepositoryFile;
 import org.pentaho.platform.api.repository2.unified.webservices.RepositoryFileDto;
+import org.mockito.MockedStatic;
+import org.pentaho.platform.engine.core.system.PentahoSessionHolder;
 import org.pentaho.platform.engine.core.system.PentahoSystem;
+import org.pentaho.platform.plugin.services.importer.IPlatformImporter;
+import org.pentaho.platform.plugin.services.importer.PlatformImportException;
+import org.pentaho.platform.plugin.services.importexport.IRepositoryImportLogger;
+import org.pentaho.platform.plugin.services.importexport.SessionExpirationDetector;
 import org.pentaho.platform.plugin.services.importexport.BaseExportProcessor;
 import org.pentaho.platform.plugin.services.importexport.ExportHandler;
 import org.pentaho.platform.repository2.ClientRepositoryPaths;
 import org.pentaho.platform.repository2.unified.fileio.RepositoryFileOutputStream;
 import org.pentaho.platform.repository2.unified.webservices.DefaultUnifiedRepositoryWebService;
 import org.pentaho.platform.security.policy.rolebased.actions.RepositoryCreateAction;
+import org.pentaho.platform.web.http.messages.Messages;
+import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.InputStream;
+import java.io.StringWriter;
 import java.io.UnsupportedEncodingException;
 import java.net.URLDecoder;
 import java.net.URLEncoder;
@@ -50,15 +64,22 @@ import jakarta.ws.rs.core.StreamingOutput;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -1011,6 +1032,422 @@ public class FileServiceTest {
 
     verify( fileService ).clearBowlCache();
   }
+
+  // region BISERVER-15532 - session expiration during restore
+
+  private static final String EXPECTED_SESSION_EXPIRED_MESSAGE =
+    Messages.getInstance().getString( "FileService.ERROR_RESTORE_SESSION_EXPIRED" );
+  private static final String EXPECTED_UNABLE_TO_RECORD_EXPIRATION_MESSAGE =
+    Messages.getInstance().getString( "FileService.ERROR_UNABLE_TO_RECORD_SESSION_EXPIRATION" );
+  private static final String EXPECTED_UNABLE_TO_PROBE_MESSAGE =
+    Messages.getInstance().getString( "FileService.ERROR_UNABLE_TO_PROBE_SESSION" );
+  private static final String EXPECTED_UNABLE_TO_COMPLETE_LOG_MESSAGE =
+    Messages.getInstance().getString( "FileService.ERROR_UNABLE_TO_COMPLETE_RESTORE_LOG" );
+
+  /**
+   * Captures what {@code FileService} writes to the server log, so the messages reporting a failure of the restore-log
+   * machinery itself can be asserted. Those messages never reach the restore log or the client — the server log is the
+   * only place they appear — so this is the only way to pin them.
+   */
+  private StringWriter serverLog;
+  private Appender serverLogAppender;
+
+  /**
+   * Fails when a key does not resolve. {@code MessageUtil} degrades a missing key to {@code !key!} rather than
+   * throwing, and the assertions below compare the server log against the same resolved constant, so without this the
+   * message could silently become the raw key and every other assertion in the test would still pass.
+   */
+  private void assertLocalized( String key, String resolvedMessage ) {
+    assertNotEquals( "The message must resolve from the bundle", "!" + key + "!", resolvedMessage );
+  }
+
+  private void captureServerLog() {
+    serverLog = new StringWriter();
+    serverLogAppender = LogUtil.makeAppender( "biserver15532-appender", serverLog, "%m%n" );
+    LogUtil.addAppender( serverLogAppender, LogManager.getLogger( FileService.class ), Level.ERROR );
+  }
+
+  @After
+  public void releaseServerLog() {
+    if ( serverLogAppender != null ) {
+      LogUtil.removeAppender( serverLogAppender, LogManager.getLogger( FileService.class ) );
+      serverLogAppender = null;
+    }
+  }
+
+  @Test
+  public void shouldReportUnableToRecordSessionExpirationWhenTheRestoreLogRejectsTheMessage() throws Exception {
+    assertLocalized( "FileService.ERROR_UNABLE_TO_RECORD_SESSION_EXPIRATION",
+      EXPECTED_UNABLE_TO_RECORD_EXPIRATION_MESSAGE );
+    captureServerLog();
+    doReturn( true ).when( fileService ).doCanAdminister();
+    doNothing().when( fileService ).clearBowlCache();
+
+    IPlatformImporter importer = mock( IPlatformImporter.class );
+    IRepositoryImportLogger importLogger = mock( IRepositoryImportLogger.class );
+    PlatformImportException importException = new PlatformImportException( "session gone" );
+    when( importer.getRepositoryImportLogger() ).thenReturn( importLogger );
+    doThrow( importException ).when( importer ).importFile( any() );
+    doThrow( new RuntimeException( "restore log is unwritable" ) ).when( importLogger ).error( anyString() );
+
+    SessionExpirationDetector detector = mock( SessionExpirationDetector.class );
+    when( detector.isCausedBySessionExpiration( importException ) ).thenReturn( true );
+    fileService.setSessionExpirationDetector( detector );
+
+    File logFile = File.createTempFile( "biserver15532", ".log" );
+    logFile.deleteOnExit();
+
+    try ( MockedStatic<PentahoSystem> pentahoSystem = mockStatic( PentahoSystem.class );
+          MockedStatic<PentahoSessionHolder> sessionHolder = mockStatic( PentahoSessionHolder.class ) ) {
+      pentahoSystem.when( () -> PentahoSystem.get( IPlatformImporter.class ) ).thenReturn( importer );
+      sessionHolder.when( PentahoSessionHolder::getSession ).thenReturn( mock( IPentahoSession.class ) );
+
+      try {
+        fileService.systemRestore( mock( InputStream.class ), "true", "true", "true", logFile.getAbsolutePath(),
+          "DEBUG", "backup.zip" );
+        fail( "The session expiration failure was expected" );
+      } catch ( PlatformImportException expected ) {
+        assertEquals( EXPECTED_SESSION_EXPIRED_MESSAGE, expected.getLocalizedMessage() );
+      }
+    }
+
+    assertTrue( "The server log should explain that the expiration could not be recorded",
+      serverLog.toString().contains( EXPECTED_UNABLE_TO_RECORD_EXPIRATION_MESSAGE ) );
+  }
+
+  @Test
+  public void shouldReportUnableToProbeSessionWhenTheProbeFails() throws Exception {
+    assertLocalized( "FileService.ERROR_UNABLE_TO_PROBE_SESSION", EXPECTED_UNABLE_TO_PROBE_MESSAGE );
+    captureServerLog();
+    doReturn( true ).when( fileService ).doCanAdminister();
+    doNothing().when( fileService ).clearBowlCache();
+
+    IPlatformImporter importer = mock( IPlatformImporter.class );
+    IRepositoryImportLogger importLogger = mock( IRepositoryImportLogger.class );
+    when( importer.getRepositoryImportLogger() ).thenReturn( importLogger );
+
+    SessionExpirationDetector detector = mock( SessionExpirationDetector.class );
+    doThrow( new RuntimeException( "session probe blew up" ) ).when( detector ).isSessionExpired( any() );
+    fileService.setSessionExpirationDetector( detector );
+
+    File logFile = File.createTempFile( "biserver15532", ".log" );
+    logFile.deleteOnExit();
+
+    try ( MockedStatic<PentahoSystem> pentahoSystem = mockStatic( PentahoSystem.class );
+          MockedStatic<PentahoSessionHolder> sessionHolder = mockStatic( PentahoSessionHolder.class ) ) {
+      pentahoSystem.when( () -> PentahoSystem.get( IPlatformImporter.class ) ).thenReturn( importer );
+      sessionHolder.when( PentahoSessionHolder::getSession ).thenReturn( mock( IPentahoSession.class ) );
+
+      // The import itself succeeds; only the probe fails, and that must not fail the restore.
+      fileService.systemRestore( mock( InputStream.class ), "true", "true", "true", logFile.getAbsolutePath(),
+        "DEBUG", "backup.zip" );
+    }
+
+    assertTrue( "The server log should explain that the session could not be probed",
+      serverLog.toString().contains( EXPECTED_UNABLE_TO_PROBE_MESSAGE ) );
+    // An inconclusive probe must not be reported to the user as an expiry.
+    verify( importLogger, never() ).error( EXPECTED_SESSION_EXPIRED_MESSAGE );
+  }
+
+  @Test
+  public void shouldReportUnableToCompleteRestoreLogWhenEndJobFails() throws Exception {
+    assertLocalized( "FileService.ERROR_UNABLE_TO_COMPLETE_RESTORE_LOG", EXPECTED_UNABLE_TO_COMPLETE_LOG_MESSAGE );
+    captureServerLog();
+    doReturn( true ).when( fileService ).doCanAdminister();
+    doNothing().when( fileService ).clearBowlCache();
+
+    IPlatformImporter importer = mock( IPlatformImporter.class );
+    IRepositoryImportLogger importLogger = mock( IRepositoryImportLogger.class );
+    when( importer.getRepositoryImportLogger() ).thenReturn( importLogger );
+    doThrow( new IllegalStateException( "no job started for current thread" ) ).when( importLogger ).endJob();
+
+    SessionExpirationDetector detector = mock( SessionExpirationDetector.class );
+    when( detector.isSessionExpired( any() ) ).thenReturn( false );
+    fileService.setSessionExpirationDetector( detector );
+
+    File logFile = File.createTempFile( "biserver15532", ".log" );
+    logFile.deleteOnExit();
+
+    try ( MockedStatic<PentahoSystem> pentahoSystem = mockStatic( PentahoSystem.class );
+          MockedStatic<PentahoSessionHolder> sessionHolder = mockStatic( PentahoSessionHolder.class ) ) {
+      pentahoSystem.when( () -> PentahoSystem.get( IPlatformImporter.class ) ).thenReturn( importer );
+      sessionHolder.when( PentahoSessionHolder::getSession ).thenReturn( mock( IPentahoSession.class ) );
+
+      // A restore log that cannot be completed must not fail an otherwise successful restore.
+      fileService.systemRestore( mock( InputStream.class ), "true", "true", "true", logFile.getAbsolutePath(),
+        "DEBUG", "backup.zip" );
+    }
+
+    assertTrue( "The server log should explain that the restore log could not be completed",
+      serverLog.toString().contains( EXPECTED_UNABLE_TO_COMPLETE_LOG_MESSAGE ) );
+  }
+
+  @Test
+  public void shouldReportSessionExpirationWhenHttpSessionExpiresDuringRestore() throws Exception {
+    doReturn( true ).when( fileService ).doCanAdminister();
+    doNothing().when( fileService ).clearBowlCache();
+
+    IPlatformImporter importer = mock( IPlatformImporter.class );
+    IRepositoryImportLogger importLogger = mock( IRepositoryImportLogger.class );
+    when( importer.getRepositoryImportLogger() ).thenReturn( importLogger );
+
+    SessionExpirationDetector detector = mock( SessionExpirationDetector.class );
+    when( detector.isSessionExpired( any() ) ).thenReturn( true );
+    fileService.setSessionExpirationDetector( detector );
+
+    File logFile = File.createTempFile( "biserver15532", ".log" );
+    logFile.deleteOnExit();
+
+    try ( MockedStatic<PentahoSystem> pentahoSystem = mockStatic( PentahoSystem.class );
+          MockedStatic<PentahoSessionHolder> sessionHolder = mockStatic( PentahoSessionHolder.class ) ) {
+      pentahoSystem.when( () -> PentahoSystem.get( IPlatformImporter.class ) ).thenReturn( importer );
+      sessionHolder.when( PentahoSessionHolder::getSession ).thenReturn( mock( IPentahoSession.class ) );
+
+      try {
+        fileService.systemRestore( mock( InputStream.class ), "true", "true", "true", logFile.getAbsolutePath(),
+          "DEBUG", "backup.zip" );
+        fail( "A PlatformImportException was expected because the session expired" );
+      } catch ( PlatformImportException expected ) {
+        assertEquals( EXPECTED_SESSION_EXPIRED_MESSAGE, expected.getMessage() );
+        assertEquals( PlatformImportException.SESSION_EXPIRED, expected.getErrorStatus() );
+        // Detected by the final session probe rather than by a failure, so there is no cause to chain.
+        assertNull( expected.getCause() );
+      }
+    }
+
+    verify( importLogger ).error( EXPECTED_SESSION_EXPIRED_MESSAGE );
+  }
+
+  @Test
+  public void shouldNotReportSessionExpirationWhenSessionRemainsValid() throws Exception {
+    doReturn( true ).when( fileService ).doCanAdminister();
+    doNothing().when( fileService ).clearBowlCache();
+
+    IPlatformImporter importer = mock( IPlatformImporter.class );
+    IRepositoryImportLogger importLogger = mock( IRepositoryImportLogger.class );
+    when( importer.getRepositoryImportLogger() ).thenReturn( importLogger );
+
+    SessionExpirationDetector detector = mock( SessionExpirationDetector.class );
+    when( detector.isSessionExpired( any() ) ).thenReturn( false );
+    fileService.setSessionExpirationDetector( detector );
+
+    File logFile = File.createTempFile( "biserver15532", ".log" );
+    logFile.deleteOnExit();
+
+    try ( MockedStatic<PentahoSystem> pentahoSystem = mockStatic( PentahoSystem.class );
+          MockedStatic<PentahoSessionHolder> sessionHolder = mockStatic( PentahoSessionHolder.class ) ) {
+      pentahoSystem.when( () -> PentahoSystem.get( IPlatformImporter.class ) ).thenReturn( importer );
+      sessionHolder.when( PentahoSessionHolder::getSession ).thenReturn( mock( IPentahoSession.class ) );
+
+      fileService.systemRestore( mock( InputStream.class ), "true", "true", "true", logFile.getAbsolutePath(),
+        "DEBUG", "backup.zip" );
+    }
+
+    verify( importLogger, never() ).error( anyString() );
+    verify( importLogger ).endJob();
+  }
+
+  @Test
+  public void shouldPropagateUnrelatedImportException() throws Exception {
+    doReturn( true ).when( fileService ).doCanAdminister();
+    doNothing().when( fileService ).clearBowlCache();
+
+    IPlatformImporter importer = mock( IPlatformImporter.class );
+    IRepositoryImportLogger importLogger = mock( IRepositoryImportLogger.class );
+    PlatformImportException importException = new PlatformImportException( "unrelated import failure" );
+    when( importer.getRepositoryImportLogger() ).thenReturn( importLogger );
+    doThrow( importException ).when( importer ).importFile( any() );
+
+    SessionExpirationDetector detector = mock( SessionExpirationDetector.class );
+    when( detector.isCausedBySessionExpiration( importException ) ).thenReturn( false );
+    when( detector.isSessionExpired( any() ) ).thenReturn( false );
+    fileService.setSessionExpirationDetector( detector );
+
+    File logFile = File.createTempFile( "biserver15532", ".log" );
+    logFile.deleteOnExit();
+
+    try ( MockedStatic<PentahoSystem> pentahoSystem = mockStatic( PentahoSystem.class );
+          MockedStatic<PentahoSessionHolder> sessionHolder = mockStatic( PentahoSessionHolder.class ) ) {
+      pentahoSystem.when( () -> PentahoSystem.get( IPlatformImporter.class ) ).thenReturn( importer );
+      sessionHolder.when( PentahoSessionHolder::getSession ).thenReturn( mock( IPentahoSession.class ) );
+
+      try {
+        fileService.systemRestore( mock( InputStream.class ), "true", "true", "true", logFile.getAbsolutePath(),
+          "DEBUG", "backup.zip" );
+        fail( "The original PlatformImportException was expected" );
+      } catch ( PlatformImportException expected ) {
+        assertSame( importException, expected );
+      }
+    }
+
+    verify( importLogger, never() ).error( anyString() );
+    verify( importLogger ).endJob();
+  }
+
+  @Test
+  public void shouldNotLetTheRestoreLogFailureMaskTheSessionExpiration() throws Exception {
+    // The restore log is written from a finally block. A failure to record the expiration there must not skip
+    // endJob()/the log flush, nor replace the curated SESSION_EXPIRED failure with the logging failure.
+    doReturn( true ).when( fileService ).doCanAdminister();
+    doNothing().when( fileService ).clearBowlCache();
+
+    IPlatformImporter importer = mock( IPlatformImporter.class );
+    IRepositoryImportLogger importLogger = mock( IRepositoryImportLogger.class );
+    PlatformImportException importException = new PlatformImportException( "session gone" );
+    when( importer.getRepositoryImportLogger() ).thenReturn( importLogger );
+    doThrow( importException ).when( importer ).importFile( any() );
+    doThrow( new RuntimeException( "restore log is unwritable" ) ).when( importLogger ).error( anyString() );
+
+    SessionExpirationDetector detector = mock( SessionExpirationDetector.class );
+    when( detector.isCausedBySessionExpiration( importException ) ).thenReturn( true );
+    fileService.setSessionExpirationDetector( detector );
+
+    File logFile = File.createTempFile( "biserver15532", ".log" );
+    logFile.deleteOnExit();
+
+    try ( MockedStatic<PentahoSystem> pentahoSystem = mockStatic( PentahoSystem.class );
+          MockedStatic<PentahoSessionHolder> sessionHolder = mockStatic( PentahoSessionHolder.class ) ) {
+      pentahoSystem.when( () -> PentahoSystem.get( IPlatformImporter.class ) ).thenReturn( importer );
+      sessionHolder.when( PentahoSessionHolder::getSession ).thenReturn( mock( IPentahoSession.class ) );
+
+      try {
+        fileService.systemRestore( mock( InputStream.class ), "true", "true", "true", logFile.getAbsolutePath(),
+          "DEBUG", "backup.zip" );
+        fail( "The session expiration failure was expected" );
+      } catch ( PlatformImportException expected ) {
+        assertEquals( EXPECTED_SESSION_EXPIRED_MESSAGE, expected.getLocalizedMessage() );
+        assertEquals( PlatformImportException.SESSION_EXPIRED, expected.getErrorStatus() );
+        assertSame( importException, expected.getCause() );
+      }
+    }
+
+    // The log was still finalised and flushed despite the logger failing.
+    verify( importLogger ).error( anyString() );
+    verify( importLogger ).endJob();
+  }
+
+  @Test
+  public void shouldFlushTheRestoreLogWhenEndJobAndTheSessionProbeBothFail() throws Exception {
+    // The whole finally block must be total: neither the session probe nor endJob() may skip the flush to disk or
+    // replace the failure the caller is waiting for.
+    doReturn( true ).when( fileService ).doCanAdminister();
+    doNothing().when( fileService ).clearBowlCache();
+
+    IPlatformImporter importer = mock( IPlatformImporter.class );
+    IRepositoryImportLogger importLogger = mock( IRepositoryImportLogger.class );
+    PlatformImportException importException = new PlatformImportException( "unrelated import failure" );
+    when( importer.getRepositoryImportLogger() ).thenReturn( importLogger );
+    doThrow( importException ).when( importer ).importFile( any() );
+    doThrow( new IllegalStateException( "no job started for current thread" ) ).when( importLogger ).endJob();
+
+    SessionExpirationDetector detector = mock( SessionExpirationDetector.class );
+    when( detector.isCausedBySessionExpiration( importException ) ).thenReturn( false );
+    doThrow( new RuntimeException( "session probe blew up" ) ).when( detector ).isSessionExpired( any() );
+    fileService.setSessionExpirationDetector( detector );
+
+    File logFile = File.createTempFile( "biserver15532", ".log" );
+    logFile.deleteOnExit();
+
+    try ( MockedStatic<PentahoSystem> pentahoSystem = mockStatic( PentahoSystem.class );
+          MockedStatic<PentahoSessionHolder> sessionHolder = mockStatic( PentahoSessionHolder.class ) ) {
+      pentahoSystem.when( () -> PentahoSystem.get( IPlatformImporter.class ) ).thenReturn( importer );
+      sessionHolder.when( PentahoSessionHolder::getSession ).thenReturn( mock( IPentahoSession.class ) );
+
+      try {
+        fileService.systemRestore( mock( InputStream.class ), "true", "true", "true", logFile.getAbsolutePath(),
+          "DEBUG", "backup.zip" );
+        fail( "The original import failure was expected" );
+      } catch ( PlatformImportException expected ) {
+        // The caller still learns what actually went wrong, not that the logger or the probe failed.
+        assertSame( importException, expected );
+      }
+    }
+
+    // An inconclusive probe must not put a session-expiry explanation into the log.
+    verify( importLogger, never() ).error( anyString() );
+    verify( importLogger ).endJob();
+    // The flush still ran: the descriptor was closed rather than leaked.
+    assertTrue( logFile.exists() );
+  }
+
+  @Test
+  public void shouldPropagateUnrelatedRuntimeException() throws Exception {
+    doReturn( true ).when( fileService ).doCanAdminister();
+    doNothing().when( fileService ).clearBowlCache();
+
+    IPlatformImporter importer = mock( IPlatformImporter.class );
+    IRepositoryImportLogger importLogger = mock( IRepositoryImportLogger.class );
+    RuntimeException importException = new RuntimeException( "unrelated runtime failure" );
+    when( importer.getRepositoryImportLogger() ).thenReturn( importLogger );
+    doThrow( importException ).when( importer ).importFile( any() );
+
+    SessionExpirationDetector detector = mock( SessionExpirationDetector.class );
+    when( detector.isCausedBySessionExpiration( importException ) ).thenReturn( false );
+    when( detector.isSessionExpired( any() ) ).thenReturn( false );
+    fileService.setSessionExpirationDetector( detector );
+
+    File logFile = File.createTempFile( "biserver15532", ".log" );
+    logFile.deleteOnExit();
+
+    try ( MockedStatic<PentahoSystem> pentahoSystem = mockStatic( PentahoSystem.class );
+          MockedStatic<PentahoSessionHolder> sessionHolder = mockStatic( PentahoSessionHolder.class ) ) {
+      pentahoSystem.when( () -> PentahoSystem.get( IPlatformImporter.class ) ).thenReturn( importer );
+      sessionHolder.when( PentahoSessionHolder::getSession ).thenReturn( mock( IPentahoSession.class ) );
+
+      try {
+        fileService.systemRestore( mock( InputStream.class ), "true", "true", "true", logFile.getAbsolutePath(),
+          "DEBUG", "backup.zip" );
+        fail( "The original RuntimeException was expected" );
+      } catch ( RuntimeException expected ) {
+        assertSame( importException, expected );
+      }
+    }
+
+    verify( importLogger, never() ).error( anyString() );
+    verify( importLogger ).endJob();
+  }
+
+  @Test
+  public void shouldReportSessionExpirationFromImportExceptionCause() throws Exception {
+    doReturn( true ).when( fileService ).doCanAdminister();
+    doNothing().when( fileService ).clearBowlCache();
+
+    IPlatformImporter importer = mock( IPlatformImporter.class );
+    IRepositoryImportLogger importLogger = mock( IRepositoryImportLogger.class );
+    PlatformImportException importException = new PlatformImportException( "General Error",
+      new IllegalStateException( "getAttribute: Session already invalidated" ) );
+    when( importer.getRepositoryImportLogger() ).thenReturn( importLogger );
+    doThrow( importException ).when( importer ).importFile( any() );
+
+    SessionExpirationDetector detector = new SessionExpirationDetector();
+    fileService.setSessionExpirationDetector( detector );
+
+    File logFile = File.createTempFile( "biserver15532", ".log" );
+    logFile.deleteOnExit();
+
+    try ( MockedStatic<PentahoSystem> pentahoSystem = mockStatic( PentahoSystem.class );
+          MockedStatic<PentahoSessionHolder> sessionHolder = mockStatic( PentahoSessionHolder.class ) ) {
+      pentahoSystem.when( () -> PentahoSystem.get( IPlatformImporter.class ) ).thenReturn( importer );
+      sessionHolder.when( PentahoSessionHolder::getSession ).thenReturn( mock( IPentahoSession.class ) );
+
+      try {
+        fileService.systemRestore( mock( InputStream.class ), "true", "true", "true", logFile.getAbsolutePath(),
+          "DEBUG", "backup.zip" );
+        fail( "A PlatformImportException was expected because the session expired" );
+      } catch ( PlatformImportException expected ) {
+        assertEquals( EXPECTED_SESSION_EXPIRED_MESSAGE, expected.getMessage() );
+        assertEquals( PlatformImportException.SESSION_EXPIRED, expected.getErrorStatus() );
+        // The failure that revealed the expiration is chained so the stack identifying the layer that rejected the
+        // invalidated session is not lost.
+        assertSame( importException, expected.getCause() );
+      }
+    }
+
+    verify( importLogger ).error( EXPECTED_SESSION_EXPIRED_MESSAGE );
+    verify( importLogger ).endJob();
+  }
+
+  // endregion
 
   @Test
   public void testSystemBackupClearsBowlCacheBeforeExport() throws Exception {

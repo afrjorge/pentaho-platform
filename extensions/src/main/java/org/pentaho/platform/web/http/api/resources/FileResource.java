@@ -211,8 +211,19 @@ public class FileResource extends AbstractJaxRSResource {
    * the metastore.
    * <p/>
    * <p><b>Example Request:</b><br /> POST pentaho/api/repo/files/systemRestore </p>
+   * <p>
+   * Import failures return HTTP 500. When the failure is a session expiration during a long-running restore, the
+   * actionable server explanation is returned as a plain-text response body; every other import failure returns an
+   * empty body so that internal detail is not disclosed.
+   * </p>
    *
    * @param fileUpload The zip file generated using the backup endpoint, used to do a full system restore.
+   * @param overwriteFile Whether existing repository files should be overwritten.
+   * @param applyAclSettings Whether access-control settings from the backup should be applied.
+   * @param overwriteAclSettings Whether existing access-control settings should be overwritten.
+   * @param logFile The server-side restore-log destination.
+   * @param logLevel The repository import log level.
+   * @param backupBundlePath The original path or name of the uploaded backup bundle.
    * @return A jax-rs Response object with the appropriate status code, header, and body.
    */
   @POST
@@ -232,10 +243,33 @@ public class FileResource extends AbstractJaxRSResource {
     } catch ( IllegalArgumentException iae ) {
       throw new WebApplicationException( iae, Response.Status.BAD_REQUEST );
     } catch ( PlatformImportException e ) {
-      throw new WebApplicationException( e, Response.Status.INTERNAL_SERVER_ERROR );
+      throw new WebApplicationException( e, buildRestoreFailureResponse( e ) );
     } catch ( SecurityException e ) {
       throw new WebApplicationException( e, Response.Status.FORBIDDEN );
     }
+  }
+
+  /**
+   * Builds the error response for a failed system restore.
+   * <p>
+   * Only {@link PlatformImportException#SESSION_EXPIRED} carries a curated, user-facing explanation, so only that
+   * message is echoed to the client. Every other import failure keeps the historical empty-bodied 500 so that internal
+   * detail such as repository paths is not disclosed. The explicit media type is required because the import/export
+   * command line requests with {@code Accept: multipart/form-data}, and it matches the {@code text/plain} rendering
+   * that {@code com.pentaho.problemdetails.mappers.ServiceExceptionHandler} applies to HTTP 500 responses.
+   *
+   * @param e the import failure raised by the restore
+   * @return the response to send to the client
+   */
+  protected Response buildRestoreFailureResponse( PlatformImportException e ) {
+    if ( e.getErrorStatus() != PlatformImportException.SESSION_EXPIRED ) {
+      return Response.status( Response.Status.INTERNAL_SERVER_ERROR ).build();
+    }
+
+    return Response.status( Response.Status.INTERNAL_SERVER_ERROR )
+      .type( MediaType.TEXT_PLAIN )
+      .entity( e.getLocalizedMessage() )
+      .build();
   }
 
   /**

@@ -44,6 +44,14 @@ public class PlatformImportException extends Exception {
 
   public static final int PUBLISH_NAME_ERROR = 13;
 
+  /**
+   * The operation could not complete because the HTTP session backing it expired while it was still running.
+   * <p>
+   * Exceptions carrying this status hold a curated, user-facing explanation as their message, so that message is safe
+   * to return to the client. Every other status may carry internal detail and must not be echoed verbatim.
+   */
+  public static final int SESSION_EXPIRED = 14;
+
   private int errorStatusCode = PlatformImportException.PUBLISH_TO_SERVER_FAILED;
 
   public PlatformImportException( String s ) {

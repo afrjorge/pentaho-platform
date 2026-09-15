@@ -17,6 +17,7 @@ package org.pentaho.platform.plugin.services.importexport;
 import com.google.common.annotations.VisibleForTesting;
 import com.hitachivantara.security.web.impl.client.csrf.jaxrsv3.CsrfTokenFilter;
 import com.hitachivantara.security.web.impl.client.csrf.jaxrsv3.util.SessionCookiesFilter;
+import jakarta.ws.rs.ProcessingException;
 import jakarta.ws.rs.client.Client;
 import jakarta.ws.rs.client.ClientBuilder;
 import jakarta.ws.rs.client.Entity;
@@ -59,6 +60,10 @@ import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
+import java.util.Collections;
+import java.util.IdentityHashMap;
+import java.util.Locale;
+import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
@@ -724,9 +729,46 @@ public class CommandLineProcessor {
     }
   }
 
+  /**
+   * Builds a human-readable description of a throwable and its cause chain so that exceptions without a message (a
+   * frequent case for connection failures) still produce actionable output. Circular cause chains are traversed safely.
+   *
+   * @param throwable the throwable to describe
+   * @return a non-blank description of the throwable
+   */
+  @VisibleForTesting
+  String describeThrowable( Throwable throwable ) {
+    StringBuilder description = new StringBuilder();
+    Set<Throwable> visited = Collections.newSetFromMap( new IdentityHashMap<>() );
+    Throwable current = throwable;
+    while ( current != null && visited.add( current ) ) {
+      if ( description.length() > 0 ) {
+        description.append( " -> " );
+      }
+      description.append( current.getClass().getSimpleName() );
+      if ( StringUtils.isNotBlank( current.getMessage() ) ) {
+        description.append( ": " ).append( current.getMessage() );
+      }
+      current = current.getCause();
+    }
+    return description.toString();
+  }
+
+  /**
+   * Converts an import/export HTTP response into the corresponding console and log-file message.
+   * <p>
+   * Server-error responses preserve the server's plain-text explanation without the informational response prefix so
+   * restore failures remain actionable at the command line.
+   *
+   * @param logFile the command log destination
+   * @param path the imported or exported file path
+   * @param response the HTTP response to report
+   * @param requestType the operation that produced the response
+   */
   @VisibleForTesting
   void logResponseMessage( String logFile, String path, Response response, RequestType requestType ) {
     boolean badLogFilePath = false;
+    boolean serverError = false;
     String responseBody = null;
     
     if ( response.getStatus() == Response.Status.OK.getStatusCode() ) {
@@ -745,12 +787,18 @@ public class CommandLineProcessor {
       // HTTP 406 Not Acceptable - content-type mismatch
       errorMessage =
         Messages.getInstance().getErrorString( "CommandLineProcessor.ERROR_0011_NOT_ACCEPTABLE" );
+    } else if ( response.getStatus() == Response.Status.INTERNAL_SERVER_ERROR.getStatusCode() ) {
+      errorMessage =
+        Messages.getInstance().getErrorString( "CommandLineProcessor.ERROR_0012_SERVER_ERROR",
+          requestType.toString().toLowerCase( Locale.ROOT ) );
+      serverError = true;
     } else {
       // Fallback for any other unexpected HTTP status
       errorMessage = "Unexpected HTTP response status: " + response.getStatus();
     }
 
     StringBuilder message = new StringBuilder( errorMessage );
+    boolean detailAppended = false;
     if ( !badLogFilePath ) {
       message.append( System.getProperty( "line.separator" ) );
       if ( response.hasEntity() ) {
@@ -766,10 +814,26 @@ public class CommandLineProcessor {
             message.append( Messages.getInstance().getString( "CommandLineProcessor.INFO_REST_RESPONSE_RECEIVED",
               responseBody ) );
           }
+          detailAppended = true;
+        } else if ( serverError ) {
+          // Only curated server explanations are appended, and those are sent as text/plain. Container-rendered error
+          // pages carry no information the operator can act on, so they are dropped.
+          if ( isPlainText( response ) && StringUtils.isNotBlank( responseBody ) ) {
+            message.append( StringUtils.trimToEmpty( responseBody ) );
+            detailAppended = true;
+          }
         } else {
           message.append( Messages.getInstance().getString( "CommandLineProcessor.INFO_REST_RESPONSE_RECEIVED",
             responseBody ) );
+          detailAppended = true;
         }
+      }
+      if ( serverError && !detailAppended ) {
+        // ERROR_0012_SERVER_ERROR announces an explanation that is not there; use the variant that does not. This is
+        // only reached when nothing usable was appended above, so datasource import details are never discarded.
+        message.setLength( 0 );
+        message.append( Messages.getInstance().getErrorString(
+          "CommandLineProcessor.ERROR_0014_SERVER_ERROR_NO_DETAIL", requestType.toString().toLowerCase( Locale.ROOT ) ) );
       }
       System.out.println( message );
       if ( StringUtils.isNotBlank( logFile ) ) {
@@ -778,6 +842,20 @@ public class CommandLineProcessor {
     } else {
       System.out.println( message );
     }
+  }
+
+  /**
+   * Indicates whether a response body is plain text, and therefore a message intended for the operator rather than a
+   * container-rendered error page.
+   *
+   * @param response the HTTP response to inspect
+   * @return {@code true} when the response media type is {@code text/plain}
+   */
+  private boolean isPlainText( Response response ) {
+    MediaType mediaType = response.getMediaType();
+    return mediaType != null
+      && MediaType.TEXT_PLAIN_TYPE.getType().equalsIgnoreCase( mediaType.getType() )
+      && MediaType.TEXT_PLAIN_TYPE.getSubtype().equalsIgnoreCase( mediaType.getSubtype() );
   }
 
   /**
@@ -964,10 +1042,17 @@ public class CommandLineProcessor {
       System.err.println( message );
       log.error( message );
       writeToFile( message, logFile );
+    } catch ( ProcessingException pe ) {
+      String message = Messages.getInstance().getErrorString( "CommandLineProcessor.ERROR_0013_RESTORE_CONNECTION_LOST",
+        describeThrowable( pe ) );
+      System.err.println( message );
+      log.error( message, pe );
+      writeToFile( message, logFile );
     } catch ( Exception e ) {
-      System.err.println( e.getMessage() );
-      log.error( e.getMessage() );
-      writeToFile( e.getMessage(), logFile );
+      String message = describeThrowable( e );
+      System.err.println( message );
+      log.error( message, e );
+      writeToFile( message, logFile );
     } finally {
       // cleanup the jersey resources
       if( client != null ) {
